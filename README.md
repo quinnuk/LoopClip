@@ -80,3 +80,9 @@ AquariumDownloader/
   and processing is nearly instant; it only falls back to a slower
   re-encode if the source codec doesn't allow a clean copy-cut at that
   timestamp.
+
+## 📜 License
+
+This project is released under the [MIT License](LICENSE).
+
+You are free to use, modify, and share this software.
