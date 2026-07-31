@@ -114,41 +114,49 @@ def process_video(
         return
 
     # Fallback: re-encode the video (needed if stream copy can't cut
-    # cleanly on this codec). This output is used as screensaver
-    # background footage, not for archival quality, so we prioritise
-    # speed: try the GPU (NVENC) first with a relaxed quality target,
-    # and only fall back to slower CPU encoding if no Nvidia GPU/driver
-    # is available on the machine running this.
-    nvenc_cmd = [
+    # cleanly on this codec). Target spec: H.265/HEVC, forced 4K UHD
+    # output (3840x2160) regardless of source resolution, 15 Mbps target
+    # bitrate, 30fps. Tries NVIDIA NVENC (GPU) first, and only falls back
+    # to slower CPU encoding (libx265) if no Nvidia GPU/driver is
+    # available on the machine running this.
+    hevc_nvenc_cmd = [
         "ffmpeg", "-y",
         *seek_args,
         "-i", input_path,
         *duration_args,
-        "-c:v", "h264_nvenc",
+        "-vf", "scale=3840:2160",
+        "-c:v", "hevc_nvenc",
         "-preset", "p4",       # NVENC speed/quality preset (p1 fastest - p7 slowest)
-        "-cq", "26",           # relaxed quality target - plenty for screensaver playback
+        "-rc", "vbr",
+        "-b:v", "15M",
+        "-maxrate", "15M",
+        "-bufsize", "30M",
+        "-r", "30",
         *audio_args,
         output_path,
     ]
-    returncode, stderr = _run_ffmpeg(nvenc_cmd, process_holder, cancel_check)
+    returncode, stderr = _run_ffmpeg(hevc_nvenc_cmd, process_holder, cancel_check)
     if returncode == 0 and Path(output_path).exists():
         return
 
     # CPU fallback (no Nvidia GPU available, or NVENC failed for some
-    # other reason). Faster preset + higher CRF than before, since exact
-    # quality doesn't matter for this use case.
-    cpu_cmd = [
+    # other reason) - same H.265/bitrate/framerate/resolution target via libx265.
+    hevc_cpu_cmd = [
         "ffmpeg", "-y",
         *seek_args,
         "-i", input_path,
         *duration_args,
-        "-c:v", "libx264",
+        "-vf", "scale=3840:2160",
+        "-c:v", "libx265",
         "-preset", "veryfast",
-        "-crf", "23",
+        "-b:v", "15M",
+        "-maxrate", "15M",
+        "-bufsize", "30M",
+        "-r", "30",
         *audio_args,
         output_path,
     ]
-    returncode, stderr = _run_ffmpeg(cpu_cmd, process_holder, cancel_check)
+    returncode, stderr = _run_ffmpeg(hevc_cpu_cmd, process_holder, cancel_check)
     if returncode != 0:
         tail = "\n".join((stderr or "").strip().splitlines()[-8:])
         raise RuntimeError(f"FFmpeg reported an error while processing this video:\n{tail}")
