@@ -4,6 +4,10 @@ A simple Windows app that downloads high-quality YouTube videos (aquariums,
 aquascapes, fireplaces, rain, nature) and automatically trims them into
 ready-to-use video screensavers for Projectivy Launcher on a 4K TV.
 
+## Screenshot
+
+![Aquarium Downloader Screenshot](screenshot.png)
+
 ## What's implemented (v1)
 
 - Paste-a-URL, click-Download workflow with clipboard auto-detect
