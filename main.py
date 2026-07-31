@@ -100,14 +100,21 @@ class _TimeEntry(ctk.CTkFrame):
             width=40, justify="center", fg_color=COLOR_PANEL,
             validate="key", validatecommand=vcmd,
         )
-        self.hh = ctk.CTkEntry(self, **box_kwargs)
-        self.hh.pack(side="left")
-        ctk.CTkLabel(self, text=":", width=6).pack(side="left")
-        self.mm = ctk.CTkEntry(self, **box_kwargs)
-        self.mm.pack(side="left")
-        ctk.CTkLabel(self, text=":", width=6).pack(side="left")
-        self.ss = ctk.CTkEntry(self, **box_kwargs)
-        self.ss.pack(side="left")
+        caption_kwargs = dict(font=ctk.CTkFont(size=9), text_color="gray55")
+
+        def _box_with_caption(caption_text: str) -> ctk.CTkEntry:
+            col = ctk.CTkFrame(self, fg_color="transparent")
+            col.pack(side="left")
+            box = ctk.CTkEntry(col, **box_kwargs)
+            box.pack()
+            ctk.CTkLabel(col, text=caption_text, **caption_kwargs).pack()
+            return box
+
+        self.hh = _box_with_caption("H")
+        ctk.CTkLabel(self, text=":", width=6).pack(side="left", pady=(0, 14))
+        self.mm = _box_with_caption("M")
+        ctk.CTkLabel(self, text=":", width=6).pack(side="left", pady=(0, 14))
+        self.ss = _box_with_caption("S")
 
         self.set(initial)
 
@@ -222,6 +229,10 @@ class AquariumDownloaderApp(ctk.CTk):
         self.url_entry.pack(side="left", fill="x", expand=True)
         self.url_entry.insert(0, self.cfg.get("last_url", ""))
         self._add_context_menu(self.url_entry)
+        ctk.CTkButton(
+            url_row, text="Clear", width=62, fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
+            command=self._clear_url,
+        ).pack(side="left", padx=(8, 0))
 
         # Options, two columns side by side to make better use of horizontal space
         options = ctk.CTkFrame(self, fg_color="transparent")
@@ -340,7 +351,14 @@ class AquariumDownloaderApp(ctk.CTk):
         self.cancel_btn.pack(side="left", fill="x", expand=True)
 
         # Queue list
-        ctk.CTkLabel(self, text="Queue", anchor="w").pack(fill="x", padx=pad_x)
+        queue_header = ctk.CTkFrame(self, fg_color="transparent")
+        queue_header.pack(fill="x", padx=pad_x)
+        ctk.CTkLabel(queue_header, text="Queue", anchor="w").pack(side="left")
+        self.clear_queue_btn = ctk.CTkButton(
+            queue_header, text="Clear Queue", width=100, fg_color=COLOR_CANCEL,
+            hover_color=COLOR_CANCEL_HOVER, command=self._on_clear_queue_clicked,
+        )
+        self.clear_queue_btn.pack(side="right")
         list_frame = ctk.CTkFrame(self, fg_color=COLOR_PANEL)
         list_frame.pack(fill="both", expand=True, padx=pad_x, pady=(3, 6))
         self.queue_frame = ctk.CTkScrollableFrame(list_frame, fg_color="transparent")
@@ -387,6 +405,14 @@ class AquariumDownloaderApp(ctk.CTk):
         if folder:
             self.folder_entry.delete(0, "end")
             self.folder_entry.insert(0, folder)
+
+    def _clear_url(self):
+        self.url_entry.delete(0, "end")
+        # Treat the cleared value as "already seen" so the clipboard poller
+        # doesn't immediately re-fill it from whatever's still on the
+        # clipboard.
+        self._last_seen_clip = self._read_clipboard()
+        self.url_entry.focus_set()
 
     def _poll_clipboard(self):
         """
@@ -548,6 +574,22 @@ class AquariumDownloaderApp(ctk.CTk):
         self.queue_manager.cancel()
         self.cancel_btn.configure(state="disabled")
         self._set_status("Cancelling...")
+
+    def _on_clear_queue_clicked(self):
+        if not self.queue_manager.items:
+            return
+        if self.queue_manager.is_running():
+            messagebox.showinfo(
+                "Queue Running",
+                "Cancel the running download first, then clear the queue.",
+            )
+            return
+        if not messagebox.askyesno(
+            "Clear Queue", f"Remove all {len(self.queue_manager.items)} item(s) from the queue?"
+        ):
+            return
+        self.queue_manager.clear_all()
+        self._set_status("Queue cleared.")
 
     def _save_current_settings(self, output_folder: str):
         self.cfg.update({
@@ -745,6 +787,7 @@ class AquariumDownloaderApp(ctk.CTk):
         running = self.queue_manager.is_running()
         self.start_queue_btn.configure(state="disabled" if running else "normal")
         self.cancel_btn.configure(state="normal" if running else "disabled")
+        self.clear_queue_btn.configure(state="disabled" if running else "normal")
 
 
 if __name__ == "__main__":

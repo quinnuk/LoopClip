@@ -103,6 +103,21 @@ class QueueManager:
             self.items.append(item)
         self._notify()
 
+    def clear_all(self) -> bool:
+        """
+        Removes every item from the queue. Refuses to do anything while
+        the queue is actively running, since that would orphan whatever
+        item is mid-download - the caller (UI) should Cancel first if a
+        download is in progress. Returns True if the queue was cleared,
+        False if it was left untouched because the queue is running.
+        """
+        with self._lock:
+            if self._running:
+                return False
+            self.items.clear()
+        self._notify()
+        return True
+
     def start(self):
         """Starts the worker thread if it isn't already running."""
         with self._lock:
