@@ -19,6 +19,8 @@ DEFAULTS = {
     "no_audio": False,
     "audio_bitrate": "original",  # "original" | "128" | "192" | "256" | "320"
     "video_bitrate": "15",  # "8" | "15" | "25" | "40" (Mbps, re-encode trims only)
+    "seamless_loop": False,
+    "crossfade_seconds": "2",  # "1" | "2" | "3"
     "trim_enabled": True,
     "trim_start": "00:05:00",
     "trim_duration": "00:15:00",

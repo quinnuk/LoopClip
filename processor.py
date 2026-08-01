@@ -167,6 +167,125 @@ def process_video(
         raise RuntimeError(f"FFmpeg reported an error while processing this video:\n{tail}")
 
 
+def get_duration_seconds(path: str) -> float:
+    """Returns the duration of a media file in seconds, via ffprobe."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                path,
+            ],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            creationflags=_NO_WINDOW,
+        )
+        return float(result.stdout.strip())
+    except (ValueError, OSError, FileNotFoundError) as exc:
+        raise RuntimeError(
+            "Could not determine the video's duration (needed for the seamless "
+            "loop crossfade)."
+        ) from exc
+
+
+def apply_seamless_loop(
+    input_path: str,
+    output_path: str,
+    crossfade_seconds: float,
+    video_bitrate: str,
+    no_audio: bool,
+    process_holder: Optional[dict] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> None:
+    """
+    Makes a clip loop seamlessly by cross-fading its last `crossfade_seconds`
+    into its first `crossfade_seconds` (video via FFmpeg's `xfade` filter,
+    audio via `acrossfade`), so a background loop doesn't have a visible
+    jump-cut where it repeats. The output is `crossfade_seconds` shorter
+    than the input, since the overlapping ends are blended into one shared
+    segment rather than simply appended one after another.
+
+    This always re-encodes - `xfade`/`acrossfade` can't be done as a
+    stream copy - so it's meant to run as an optional final pass over an
+    already-trimmed clip, not as a replacement for the main trim step.
+    Output stays H.265/HEVC at forced 4K UHD (3840x2160), the chosen
+    bitrate, and 30fps, same as the rest of the app's re-encodes. Tries
+    NVIDIA NVENC first, falling back to CPU (libx265) if unavailable.
+    """
+    duration = get_duration_seconds(input_path)
+    x = crossfade_seconds
+    if x * 2 >= duration:
+        raise RuntimeError(
+            f"The crossfade duration ({x:.0f}s) is too long for this "
+            f"{duration:.0f}s clip - it must be less than half the clip's length."
+        )
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    end_start = duration - x
+    vbitrate = f"{video_bitrate}M"
+
+    video_graph = (
+        f"[0:v]trim=0:{x},setpts=PTS-STARTPTS[vstart];"
+        f"[0:v]trim={end_start}:{duration},setpts=PTS-STARTPTS[vend];"
+        f"[vend][vstart]xfade=transition=fade:duration={x}:offset=0[vcross];"
+        f"[0:v]trim={x}:{end_start},setpts=PTS-STARTPTS[vmid];"
+        f"[vcross][vmid]concat=n=2:v=1:a=0[vraw];"
+        f"[vraw]scale=3840:2160[vout]"
+    )
+
+    if no_audio:
+        filter_complex = video_graph
+        map_args = ["-map", "[vout]"]
+        audio_out_args = []
+    else:
+        audio_graph = (
+            f"[0:a]atrim=0:{x},asetpts=PTS-STARTPTS[astart];"
+            f"[0:a]atrim={end_start}:{duration},asetpts=PTS-STARTPTS[aend];"
+            f"[aend][astart]acrossfade=d={x}[across];"
+            f"[0:a]atrim={x}:{end_start},asetpts=PTS-STARTPTS[amid];"
+            f"[across][amid]concat=n=2:v=0:a=1[aout]"
+        )
+        filter_complex = video_graph + ";" + audio_graph
+        map_args = ["-map", "[vout]", "-map", "[aout]"]
+        audio_out_args = ["-c:a", "aac", "-b:a", "192k"]
+
+    nvenc_cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-filter_complex", filter_complex,
+        *map_args,
+        "-c:v", "hevc_nvenc",
+        "-preset", "p4",
+        "-rc", "vbr",
+        "-b:v", vbitrate,
+        "-maxrate", vbitrate,
+        "-bufsize", f"{int(video_bitrate) * 2}M",
+        "-r", "30",
+        *audio_out_args,
+        output_path,
+    ]
+    returncode, stderr = _run_ffmpeg(nvenc_cmd, process_holder, cancel_check)
+    if returncode == 0 and Path(output_path).exists():
+        return
+
+    cpu_cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-filter_complex", filter_complex,
+        *map_args,
+        "-c:v", "libx265",
+        "-preset", "veryfast",
+        "-b:v", vbitrate,
+        "-maxrate", vbitrate,
+        "-bufsize", f"{int(video_bitrate) * 2}M",
+        "-r", "30",
+        *audio_out_args,
+        output_path,
+    ]
+    returncode, stderr = _run_ffmpeg(cpu_cmd, process_holder, cancel_check)
+    if returncode != 0:
+        tail = "\n".join((stderr or "").strip().splitlines()[-8:])
+        raise RuntimeError(f"FFmpeg reported an error while creating the seamless loop:\n{tail}")
+
+
 def _run_ffmpeg(
     cmd: list,
     process_holder: Optional[dict],

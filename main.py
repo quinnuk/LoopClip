@@ -60,6 +60,7 @@ STATE_COLORS = {
     QueueState.QUEUED: "#9AA0A6",
     QueueState.DOWNLOADING: "#3B8EEA",
     QueueState.TRIMMING: "#E8A33D",
+    QueueState.LOOPING: "#B47EE8",
     QueueState.FINISHED: "#3FB950",
     QueueState.ERROR: "#F85149",
     QueueState.CANCELLED: "#8B8F98",
@@ -78,6 +79,12 @@ VIDEO_BITRATE_LABELS = [
     ("15", "15 Mbps"),
     ("25", "25 Mbps"),
     ("40", "40 Mbps"),
+]
+
+CROSSFADE_LABELS = [
+    ("1", "1 sec"),
+    ("2", "2 sec"),
+    ("3", "3 sec"),
 ]
 
 QUALITY_LABELS = {
@@ -340,6 +347,26 @@ class LoopClipApp(ctk.CTk):
         self.duration_entry.pack(anchor="w")
         self._toggle_trim_fields()
 
+        loop_row = ctk.CTkFrame(right, fg_color="transparent")
+        loop_row.pack(fill="x", pady=(10, 0))
+        self.seamless_loop_var = ctk.BooleanVar(value=self.cfg.get("seamless_loop", False))
+        ctk.CTkCheckBox(
+            loop_row, text="Seamless loop crossfade", variable=self.seamless_loop_var,
+            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
+            command=self._toggle_crossfade_field,
+        ).pack(side="left")
+        self.crossfade_var = ctk.StringVar(
+            value=self._crossfade_to_label(self.cfg.get("crossfade_seconds", "2"))
+        )
+        self.crossfade_menu = ctk.CTkOptionMenu(
+            loop_row, values=[label for _, label in CROSSFADE_LABELS],
+            variable=self.crossfade_var, width=80,
+            fg_color=COLOR_ACCENT, button_color=COLOR_ACCENT_HOVER,
+            button_hover_color=COLOR_ACCENT,
+        )
+        self.crossfade_menu.pack(side="left", padx=(8, 0))
+        self._toggle_crossfade_field()
+
         # After download (right column)
         ctk.CTkLabel(right, text="After Download", anchor="w").pack(fill="x", pady=(12, 0))
         self.delete_original_var = ctk.BooleanVar(value=self.cfg.get("delete_original", True))
@@ -423,6 +450,22 @@ class LoopClipApp(ctk.CTk):
             if lbl == label:
                 return key
         return "15"
+
+    def _crossfade_to_label(self, value: str) -> str:
+        for key, label in CROSSFADE_LABELS:
+            if key == value:
+                return label
+        return "2 sec"
+
+    def _label_to_crossfade(self, label: str) -> str:
+        for key, lbl in CROSSFADE_LABELS:
+            if lbl == label:
+                return key
+        return "2"
+
+    def _toggle_crossfade_field(self):
+        state = "normal" if self.seamless_loop_var.get() else "disabled"
+        self.crossfade_menu.configure(state=state)
 
     def _toggle_audio_fields(self):
         state = "disabled" if self.no_audio_var.get() else "normal"
@@ -582,6 +625,8 @@ class LoopClipApp(ctk.CTk):
             trim_duration=self.duration_entry.get().strip(),
             output_folder=output_folder,
             delete_original=self.delete_original_var.get(),
+            seamless_loop=self.seamless_loop_var.get(),
+            crossfade_seconds=self._label_to_crossfade(self.crossfade_var.get()),
         )
         self.queue_manager.add_item(item)
         self._save_current_settings(output_folder)
@@ -637,6 +682,8 @@ class LoopClipApp(ctk.CTk):
             "trim_duration": self.duration_entry.get().strip(),
             "delete_original": self.delete_original_var.get(),
             "open_folder_when_finished": self.open_folder_var.get(),
+            "seamless_loop": self.seamless_loop_var.get(),
+            "crossfade_seconds": self._label_to_crossfade(self.crossfade_var.get()),
             "last_url": "",
         })
         settings_module.save_settings(self.cfg)

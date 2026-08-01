@@ -23,6 +23,7 @@ class QueueState:
     QUEUED = "Queued"
     DOWNLOADING = "Downloading"
     TRIMMING = "Trimming"
+    LOOPING = "Creating Loop"
     FINISHED = "Finished"
     ERROR = "Error"
     CANCELLED = "Cancelled"
@@ -40,6 +41,8 @@ class QueueItem:
     trim_duration: str
     output_folder: str
     delete_original: bool
+    seamless_loop: bool
+    crossfade_seconds: str
 
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     state: str = QueueState.QUEUED
@@ -240,6 +243,33 @@ class QueueManager:
                 out_path = str(Path(item.output_folder) / f"{clean_title}.mp4")
                 if str(Path(result.filepath).resolve()) != str(Path(out_path).resolve()):
                     shutil.move(result.filepath, out_path)
+
+            if self._is_cancelled():
+                self._mark_cancelled(item, temp_dir, out_path)
+                return
+
+            if item.seamless_loop:
+                item.state = QueueState.LOOPING
+                item.operation = "Creating seamless loop..."
+                self._notify()
+                # Write to the item's own temp folder first, then swap it
+                # into place - if this step fails or gets cancelled partway,
+                # the temp folder (and this partial file with it) is
+                # cleaned up automatically by the finally block below,
+                # rather than leaving a half-written file in the output
+                # folder.
+                looped_path = str(temp_dir / "seamless_loop.mp4")
+                processor.apply_seamless_loop(
+                    input_path=out_path,
+                    output_path=looped_path,
+                    crossfade_seconds=float(item.crossfade_seconds),
+                    video_bitrate=item.video_bitrate,
+                    no_audio=item.no_audio,
+                    process_holder=self._current_process,
+                    cancel_check=self._is_cancelled,
+                )
+                os.remove(out_path)
+                shutil.move(looped_path, out_path)
 
             if self._is_cancelled():
                 self._mark_cancelled(item, temp_dir, out_path)
