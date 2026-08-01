@@ -16,6 +16,7 @@ DEFAULTS = {
     "quality": "best",  # "best" | "4k_hdr" | "1080p"
     "no_audio": False,
     "audio_bitrate": "original",  # "original" | "128" | "192" | "256" | "320"
+    "video_bitrate": "15",  # "8" | "15" | "25" | "40" (Mbps, re-encode trims only)
     "trim_enabled": True,
     "trim_start": "00:05:00",
     "trim_duration": "00:15:00",

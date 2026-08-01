@@ -79,6 +79,7 @@ def process_video(
     start_hms: str,
     duration_hms: str,
     audio_bitrate: str,
+    video_bitrate: str,
     no_audio: bool,
     process_holder: Optional[dict] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
@@ -92,9 +93,13 @@ def process_video(
     codecs don't allow copy at arbitrary cut points), falls back to a
     re-encode of the video with high-quality settings. The audio track is
     only ever re-encoded if the user asked for a specific bitrate.
+
+    video_bitrate is a plain string of Mbps, e.g. "15" - only used by the
+    re-encode fallback path (stream copy has no bitrate to control).
     """
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     audio_args = _audio_args(audio_bitrate, no_audio)
+    vbitrate = f"{video_bitrate}M"
 
     seek_args = ["-ss", start_hms] if trim_enabled else []
     duration_args = ["-t", duration_hms] if trim_enabled else []
@@ -115,10 +120,10 @@ def process_video(
 
     # Fallback: re-encode the video (needed if stream copy can't cut
     # cleanly on this codec). Target spec: H.265/HEVC, forced 4K UHD
-    # output (3840x2160) regardless of source resolution, 15 Mbps target
-    # bitrate, 30fps. Tries NVIDIA NVENC (GPU) first, and only falls back
-    # to slower CPU encoding (libx265) if no Nvidia GPU/driver is
-    # available on the machine running this.
+    # output (3840x2160) regardless of source resolution, user-selected
+    # target bitrate, 30fps. Tries NVIDIA NVENC (GPU) first, and only
+    # falls back to slower CPU encoding (libx265) if no Nvidia GPU/driver
+    # is available on the machine running this.
     hevc_nvenc_cmd = [
         "ffmpeg", "-y",
         *seek_args,
@@ -128,9 +133,9 @@ def process_video(
         "-c:v", "hevc_nvenc",
         "-preset", "p4",       # NVENC speed/quality preset (p1 fastest - p7 slowest)
         "-rc", "vbr",
-        "-b:v", "15M",
-        "-maxrate", "15M",
-        "-bufsize", "30M",
+        "-b:v", vbitrate,
+        "-maxrate", vbitrate,
+        "-bufsize", f"{int(video_bitrate) * 2}M",
         "-r", "30",
         *audio_args,
         output_path,
@@ -149,9 +154,9 @@ def process_video(
         "-vf", "scale=3840:2160",
         "-c:v", "libx265",
         "-preset", "veryfast",
-        "-b:v", "15M",
-        "-maxrate", "15M",
-        "-bufsize", "30M",
+        "-b:v", vbitrate,
+        "-maxrate", vbitrate,
+        "-bufsize", f"{int(video_bitrate) * 2}M",
         "-r", "30",
         *audio_args,
         output_path,

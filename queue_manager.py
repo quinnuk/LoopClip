@@ -34,6 +34,7 @@ class QueueItem:
     quality: str
     no_audio: bool
     audio_bitrate: str
+    video_bitrate: str
     trim_enabled: bool
     trim_start: str
     trim_duration: str
@@ -227,6 +228,7 @@ class QueueManager:
                     start_hms=item.trim_start,
                     duration_hms=item.trim_duration,
                     audio_bitrate=item.audio_bitrate,
+                    video_bitrate=item.video_bitrate,
                     no_audio=item.no_audio,
                     process_holder=self._current_process,
                     cancel_check=self._is_cancelled,

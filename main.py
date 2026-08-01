@@ -73,6 +73,13 @@ AUDIO_BITRATE_LABELS = [
     ("320", "320 kbps"),
 ]
 
+VIDEO_BITRATE_LABELS = [
+    ("8", "8 Mbps"),
+    ("15", "15 Mbps"),
+    ("25", "25 Mbps"),
+    ("40", "40 Mbps"),
+]
+
 QUALITY_LABELS = {
     "best": "Best Available",
     "4k_hdr": "4K HDR Preferred",
@@ -272,6 +279,20 @@ class AquariumDownloaderApp(ctk.CTk):
             command=lambda label: self.quality_var.set(quality_values_by_label[label]),
         ).pack(fill="x", pady=(2, 6))
 
+        video_bitrate_row = ctk.CTkFrame(left, fg_color="transparent")
+        video_bitrate_row.pack(fill="x", pady=(2, 0))
+        ctk.CTkLabel(video_bitrate_row, text="Video Bitrate", anchor="w").pack(side="left")
+        self.video_bitrate_var = ctk.StringVar(
+            value=self._video_bitrate_to_label(self.cfg.get("video_bitrate", "15"))
+        )
+        ctk.CTkOptionMenu(
+            video_bitrate_row,
+            values=[label for _, label in VIDEO_BITRATE_LABELS],
+            variable=self.video_bitrate_var,
+            width=110, fg_color=COLOR_ACCENT, button_color=COLOR_ACCENT_HOVER,
+            button_hover_color=COLOR_ACCENT,
+        ).pack(side="left", padx=(19, 0))
+
         self.no_audio_var = ctk.BooleanVar(value=self.cfg.get("no_audio", False))
         ctk.CTkCheckBox(
             left, text="No sound (mute video)", variable=self.no_audio_var,
@@ -390,6 +411,18 @@ class AquariumDownloaderApp(ctk.CTk):
             if lbl == label:
                 return key
         return "original"
+
+    def _video_bitrate_to_label(self, value: str) -> str:
+        for key, label in VIDEO_BITRATE_LABELS:
+            if key == value:
+                return label
+        return "15 Mbps"
+
+    def _label_to_video_bitrate(self, label: str) -> str:
+        for key, lbl in VIDEO_BITRATE_LABELS:
+            if lbl == label:
+                return key
+        return "15"
 
     def _toggle_audio_fields(self):
         state = "disabled" if self.no_audio_var.get() else "normal"
@@ -543,6 +576,7 @@ class AquariumDownloaderApp(ctk.CTk):
             quality=self.quality_var.get(),
             no_audio=self.no_audio_var.get(),
             audio_bitrate=self._label_to_bitrate(self.audio_bitrate_var.get()),
+            video_bitrate=self._label_to_video_bitrate(self.video_bitrate_var.get()),
             trim_enabled=self.trim_var.get(),
             trim_start=self.start_entry.get().strip(),
             trim_duration=self.duration_entry.get().strip(),
@@ -597,6 +631,7 @@ class AquariumDownloaderApp(ctk.CTk):
             "quality": self.quality_var.get(),
             "no_audio": self.no_audio_var.get(),
             "audio_bitrate": self._label_to_bitrate(self.audio_bitrate_var.get()),
+            "video_bitrate": self._label_to_video_bitrate(self.video_bitrate_var.get()),
             "trim_enabled": self.trim_var.get(),
             "trim_start": self.start_entry.get().strip(),
             "trim_duration": self.duration_entry.get().strip(),
