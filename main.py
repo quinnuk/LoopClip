@@ -1,7 +1,7 @@
 """
 main.py
 -------
-Aquarium Downloader - main application window.
+LoopClip - main application window.
 
 Queue-based dark-themed UI (restyled to match the Video Downloader Pro
 look: charcoal background, teal accent buttons, header + subtitle, and a
@@ -52,7 +52,7 @@ COLOR_ACCENT_HOVER = "#0c5744"
 COLOR_CANCEL = "#8B2C2C"
 COLOR_CANCEL_HOVER = "#6E2323"
 
-TEMP_ROOT = Path(tempfile.gettempdir()) / "AquariumDownloader" / "Temp"
+TEMP_ROOT = Path(tempfile.gettempdir()) / "LoopClip" / "Temp"
 
 CLIPBOARD_POLL_MS = 150  # near-instant clipboard pickup
 
@@ -181,12 +181,12 @@ class _TimeEntry(ctk.CTkFrame):
             box.configure(state=state)
 
 
-class AquariumDownloaderApp(ctk.CTk):
+class LoopClipApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.configure(fg_color=COLOR_BG)
 
-        self.title("Aquarium Downloader")
+        self.title("LoopClip")
         self.geometry("700x820")
         self.minsize(640, 700)
         self.resizable(True, True)
@@ -826,5 +826,5 @@ class AquariumDownloaderApp(ctk.CTk):
 
 
 if __name__ == "__main__":
-    app = AquariumDownloaderApp()
+    app = LoopClipApp()
     app.mainloop()
