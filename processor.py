@@ -86,7 +86,7 @@ def build_output_filename(title: str, duration_seconds: float) -> str:
     """
     Builds the final output filename, e.g.:
     'Wide Fantasy Valley Aquascape 3hours HDR.mp4'
-      -> 'Wide Fantasy Valley Aquascape 3hours HDR - 15s loop.mp4'
+    -> 'Wide Fantasy Valley Aquascape 3hours HDR - 15s loop.mp4'
 
     Takes duration in seconds (not an HH:MM:SS string) since detected loop
     durations are fractional; shown in whole seconds for short loops and
@@ -135,6 +135,7 @@ def process_video(
     re-encode fallback path (stream copy has no bitrate to control).
     """
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
     audio_args = _audio_args(audio_bitrate, no_audio)
     vbitrate = f"{video_bitrate}M"
 
@@ -168,7 +169,7 @@ def process_video(
         *duration_args,
         "-vf", "scale=3840:2160,format=nv12",
         "-c:v", "hevc_nvenc",
-        "-preset", "p4",       # NVENC speed/quality preset (p1 fastest - p7 slowest)
+        "-preset", "p4",  # NVENC speed/quality preset (p1 fastest - p7 slowest)
         "-rc", "vbr",
         "-b:v", vbitrate,
         "-maxrate", vbitrate,
@@ -180,6 +181,7 @@ def process_video(
     returncode, nvenc_stderr = _run_ffmpeg(hevc_nvenc_cmd, process_holder, cancel_check)
     if returncode == 0 and Path(output_path).exists():
         return
+
     nvenc_tail = "\n".join((nvenc_stderr or "").strip().splitlines()[-4:])
 
     # CPU fallback (no Nvidia GPU available, or NVENC failed for some
@@ -273,6 +275,15 @@ def apply_seamless_loop(
     enough to exhaust even a well-specced machine's RAM. Keeping each
     step small and independent avoids that entirely - nothing here ever
     needs to hold more than a few seconds of video in memory at once.
+
+    The head/tail pieces are always fully re-encoded (never stream-copied)
+    to a fixed 30fps CFR timebase before being handed to `xfade`. YouTube
+    sources are frequently variable frame rate (VFR), and a stream copy
+    preserves that VFR timing exactly - `xfade`/`acrossfade` can then
+    stall indefinitely (0% CPU, no output, never exits) because it never
+    receives frames on the steady cadence it expects. Re-encoding here is
+    cheap (these pieces are only a couple of seconds long) and removes
+    that failure mode entirely.
     """
     duration = get_duration_seconds(input_path)
     x = crossfade_seconds
@@ -283,8 +294,8 @@ def apply_seamless_loop(
         )
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    end_start = duration - x
 
+    end_start = duration - x
     work_dir = Path(output_path).parent
     uid = uuid.uuid4().hex[:8]
     head_path = str(work_dir / f"_loophead_{uid}.mp4")
@@ -294,8 +305,14 @@ def apply_seamless_loop(
     concat_list_path = str(work_dir / f"_loopconcat_{uid}.txt")
 
     try:
-        _quick_trim(input_path, head_path, 0, x, no_audio, process_holder, cancel_check)
-        _quick_trim(input_path, tail_path, end_start, duration, no_audio, process_holder, cancel_check)
+        _quick_trim(
+            input_path, head_path, 0, x, no_audio, process_holder, cancel_check,
+            force_reencode=True,
+        )
+        _quick_trim(
+            input_path, tail_path, end_start, duration, no_audio, process_holder, cancel_check,
+            force_reencode=True,
+        )
         _crossfade_two_clips(
             tail_path, head_path, transition_path, x, video_bitrate, no_audio,
             process_holder, cancel_check,
@@ -308,6 +325,7 @@ def apply_seamless_loop(
         with open(concat_list_path, "w", encoding="utf-8") as f:
             f.write(f"file '{Path(middle_path).as_posix()}'\n")
             f.write(f"file '{Path(transition_path).as_posix()}'\n")
+
         concat_cmd = [
             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
             "-i", concat_list_path, "-c", "copy", output_path,
@@ -330,26 +348,40 @@ def apply_seamless_loop(
 def _quick_trim(
     input_path: str, output_path: str, start: float, end: float, no_audio: bool,
     process_holder: Optional[dict], cancel_check: Optional[Callable[[], bool]],
+    force_reencode: bool = False,
 ) -> None:
     """Extracts [start, end) of input_path into a small standalone file -
     used for pulling out the tiny head/tail pieces before blending them.
+
     Tries a fast stream copy first, falling back to a quick re-encode only
     if the copy fails; either way these pieces are small (a few seconds),
-    so this step is cheap regardless of how long the source clip is."""
+    so this step is cheap regardless of how long the source clip is.
+
+    Pass force_reencode=True when the result is going straight into the
+    `xfade`/`acrossfade` filter graph (as it is from apply_seamless_loop):
+    a stream copy preserves the source's original frame timing verbatim,
+    including any variable frame rate, which can make those filters hang
+    indefinitely. Re-encoding to a fixed 30fps CFR timebase up front avoids
+    that, and costs almost nothing since these clips are only a couple of
+    seconds long.
+    """
     dur = end - start
     audio_args = [] if no_audio else ["-c:a", "copy"]
-    copy_cmd = [
-        "ffmpeg", "-y", "-ss", str(start), "-i", input_path, "-t", str(dur),
-        "-c:v", "copy", *audio_args, "-avoid_negative_ts", "make_zero", output_path,
-    ]
-    returncode, _ = _run_ffmpeg(copy_cmd, process_holder, cancel_check)
-    if returncode == 0 and Path(output_path).exists():
-        return
+
+    if not force_reencode:
+        copy_cmd = [
+            "ffmpeg", "-y", "-ss", str(start), "-i", input_path, "-t", str(dur),
+            "-c:v", "copy", *audio_args, "-avoid_negative_ts", "make_zero", output_path,
+        ]
+        returncode, _ = _run_ffmpeg(copy_cmd, process_holder, cancel_check)
+        if returncode == 0 and Path(output_path).exists():
+            return
 
     reencode_cmd = [
         "ffmpeg", "-y", "-ss", str(start), "-i", input_path, "-t", str(dur),
+        "-vf", "fps=30",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        *([] if no_audio else ["-c:a", "aac", "-b:a", "192k"]),
+        *([] if no_audio else ["-c:a", "aac", "-b:a", "192k", "-af", "aresample=async=1"]),
         output_path,
     ]
     returncode, stderr = _run_ffmpeg(reencode_cmd, process_holder, cancel_check)
@@ -364,16 +396,35 @@ def _crossfade_two_clips(
 ) -> None:
     """Blends tail_path into head_path into a single x-second transition
     clip. Both inputs are already tiny standalone files at this point, so
-    this stays cheap no matter how long the original source video was."""
+    this stays cheap no matter how long the original source video was.
+
+    Both video streams are forced to a fixed 30fps CFR timebase (and audio
+    is nudged into sync with aresample=async) immediately before the
+    xfade/acrossfade filters. `xfade` in particular expects frames to
+    arrive on a steady, predictable cadence from both inputs - if either
+    input is VFR (as h ead/tail pieces stream-copied straight from a
+    YouTube source often are), it can stall indefinitely instead of
+    erroring out, which is what produced the "hangs forever" behaviour.
+    Normalizing here means this holds even if _quick_trim's inputs ever
+    change upstream.
+    """
     vbitrate = f"{video_bitrate}M"
-    video_graph = f"[0:v][1:v]xfade=transition=fade:duration={x}:offset=0,format=nv12[vout]"
+    video_graph = (
+        "[0:v]fps=30,format=nv12[v0];"
+        "[1:v]fps=30,format=nv12[v1];"
+        f"[v0][v1]xfade=transition=fade:duration={x}:offset=0,format=nv12[vout]"
+    )
 
     if no_audio:
         filter_complex = video_graph
         map_args = ["-map", "[vout]"]
         audio_out_args = []
     else:
-        audio_graph = f"[0:a][1:a]acrossfade=d={x}[aout]"
+        audio_graph = (
+            "[0:a]aresample=async=1[a0];"
+            "[1:a]aresample=async=1[a1];"
+            f"[a0][a1]acrossfade=d={x}[aout]"
+        )
         filter_complex = video_graph + ";" + audio_graph
         map_args = ["-map", "[vout]", "-map", "[aout]"]
         audio_out_args = ["-c:a", "aac", "-b:a", "192k"]
@@ -388,6 +439,7 @@ def _crossfade_two_clips(
     returncode, nvenc_stderr = _run_ffmpeg(nvenc_cmd, process_holder, cancel_check)
     if returncode == 0 and Path(output_path).exists():
         return
+
     nvenc_tail = "\n".join((nvenc_stderr or "").strip().splitlines()[-4:])
 
     cpu_cmd = [
@@ -432,6 +484,7 @@ def _encode_segment(
     returncode, nvenc_stderr = _run_ffmpeg(nvenc_cmd, process_holder, cancel_check)
     if returncode == 0 and Path(output_path).exists():
         return
+
     nvenc_tail = "\n".join((nvenc_stderr or "").strip().splitlines()[-4:])
 
     cpu_cmd = [
@@ -470,40 +523,42 @@ def _run_ffmpeg(
     """
     stderr_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=stderr_file,
-            text=True,
-            creationflags=_NO_WINDOW,
-        )
-    except FileNotFoundError as exc:
-        stderr_file.close()
-        raise RuntimeError(
-            "FFmpeg executable was not found. Please install FFmpeg or add it "
-            "to your system PATH."
-        ) from exc
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_file,
+                text=True,
+                creationflags=_NO_WINDOW,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "FFmpeg executable was not found. Please install FFmpeg or add it "
+                "to your system PATH."
+            ) from exc
 
-    if process_holder is not None:
-        process_holder["proc"] = proc
-
-    try:
-        while True:
-            if cancel_check is not None and cancel_check():
-                _terminate(proc)
-                raise CancelledError("FFmpeg operation cancelled by user.")
-            try:
-                proc.wait(timeout=0.1)
-                break
-            except subprocess.TimeoutExpired:
-                continue
-        stderr_file.seek(0)
-        stderr = stderr_file.read()
-        return proc.returncode, stderr
-    finally:
         if process_holder is not None:
-            process_holder["proc"] = None
+            process_holder["proc"] = proc
+
+        try:
+            while True:
+                if cancel_check is not None and cancel_check():
+                    _terminate(proc)
+                    raise CancelledError("FFmpeg operation cancelled by user.")
+                try:
+                    proc.wait(timeout=0.1)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+
+            stderr_file.seek(0)
+            stderr = stderr_file.read()
+            return proc.returncode, stderr
+        finally:
+            if process_holder is not None:
+                process_holder["proc"] = None
+    finally:
         stderr_file.close()
 
 
