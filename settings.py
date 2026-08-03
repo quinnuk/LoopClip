@@ -22,9 +22,17 @@ DEFAULTS = {
     "video_bitrate": "15",  # "8" | "15" | "25" | "40" (Mbps, re-encode trims only)
     "seamless_loop": False,
     "crossfade_seconds": "2",  # "1" | "2" | "3"
-    "trim_enabled": True,
-    "trim_start": "00:05:00",
-    "trim_duration": "00:15:00",
+
+    # Auto loop-detection (LoopyCut-style), replacing manual trim entry.
+    "auto_loop": True,
+    "loop_method": "combined",   # "combined" | "ssim" | "histogram" | "hash"
+    "similarity": 98,            # 0-100
+    "search_start": "00:00:00",  # start of the window to analyze
+    "search_stop": "",           # "" = analyze to the end of the video
+    "downsample": 1,             # analyze every Nth frame
+    "min_loop_seconds": "",      # "" = auto
+    "max_loop_seconds": "",      # "" = auto
+
     "delete_original": True,
     "open_folder_when_finished": True,
     "last_url": "",

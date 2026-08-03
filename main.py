@@ -61,12 +61,28 @@ CLIPBOARD_POLL_MS = 150  # near-instant clipboard pickup
 STATE_COLORS = {
     QueueState.QUEUED: "#9AA0A6",
     QueueState.DOWNLOADING: "#3B8EEA",
+    QueueState.ANALYZING: "#3BB8EA",
     QueueState.TRIMMING: "#E8A33D",
     QueueState.LOOPING: "#B47EE8",
     QueueState.FINISHED: "#3FB950",
     QueueState.ERROR: "#F85149",
     QueueState.CANCELLED: "#8B8F98",
 }
+
+# LoopyCut-style method options for automatic loop detection.
+LOOP_METHOD_LABELS = [
+    ("combined", "Combined (recommended)"),
+    ("ssim", "SSIM (structural)"),
+    ("histogram", "Histogram (color)"),
+    ("hash", "Hash (fastest)"),
+]
+
+DOWNSAMPLE_LABELS = [
+    ("1", "Every frame"),
+    ("2", "Every 2nd frame"),
+    ("4", "Every 4th frame"),
+    ("8", "Every 8th frame"),
+]
 
 AUDIO_BITRATE_LABELS = [
     ("original", "Original"),
@@ -383,32 +399,83 @@ class LoopClipApp(ctk.CTk):
         self.audio_bitrate_menu.pack(side="left", padx=(8, 0))
         self._toggle_audio_fields()
 
-        # Video processing / trim (right column)
+        # Video processing (right column) - automatic seamless-loop
+        # detection (LoopyCut-style: method + similarity threshold over an
+        # analyzed frame window) instead of manually typed trim points.
         ctk.CTkLabel(right, text="Video Processing", anchor="w").pack(fill="x")
-        self.trim_var = ctk.BooleanVar(value=self.cfg.get("trim_enabled", True))
+        self.auto_loop_var = ctk.BooleanVar(value=self.cfg.get("auto_loop", True))
         ctk.CTkCheckBox(
-            right, text="Trim video automatically", variable=self.trim_var,
+            right, text="Auto-detect seamless loop", variable=self.auto_loop_var,
             fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
-            command=self._on_trim_toggled,
+            command=self._on_auto_loop_toggled,
         ).pack(anchor="w", pady=(2, 6))
 
-        trim_row = ctk.CTkFrame(right, fg_color="transparent")
-        trim_row.pack(fill="x")
-        start_col = ctk.CTkFrame(trim_row, fg_color="transparent")
-        start_col.pack(side="left")
-        ctk.CTkLabel(start_col, text="Start (H:M:S)", anchor="w").pack(fill="x")
-        self.start_entry = _TimeEntry(start_col, initial=self.cfg.get("trim_start", "00:05:00"))
-        self.start_entry.pack(anchor="w")
-
-        dur_col = ctk.CTkFrame(trim_row, fg_color="transparent")
-        dur_col.pack(side="left", padx=(16, 0))
-        ctk.CTkLabel(dur_col, text="Duration (H:M:S)", anchor="w").pack(fill="x")
-        self.duration_entry = _TimeEntry(
-            dur_col, initial=self.cfg.get("trim_duration", "00:15:00"),
-            on_change=lambda: self._update_size_estimate(),
+        method_row = ctk.CTkFrame(right, fg_color="transparent")
+        method_row.pack(fill="x")
+        ctk.CTkLabel(method_row, text="Method", anchor="w", width=90).pack(side="left")
+        method_values_by_label = {label: value for value, label in LOOP_METHOD_LABELS}
+        self.loop_method_var = ctk.StringVar(
+            value=self._loop_method_to_label(self.cfg.get("loop_method", "combined"))
         )
-        self.duration_entry.pack(anchor="w")
-        self._toggle_trim_fields()
+        self.loop_method_menu = ctk.CTkOptionMenu(
+            method_row, values=[label for _, label in LOOP_METHOD_LABELS],
+            variable=self.loop_method_var, width=170,
+            fg_color=COLOR_ACCENT, button_color=COLOR_ACCENT_HOVER,
+            button_hover_color=COLOR_ACCENT,
+            command=lambda label: self.loop_method_var.set(label),
+        )
+        self.loop_method_menu.pack(side="left", padx=(6, 0))
+
+        similarity_row = ctk.CTkFrame(right, fg_color="transparent")
+        similarity_row.pack(fill="x", pady=(6, 0))
+        ctk.CTkLabel(similarity_row, text="Similarity %", anchor="w", width=90).pack(side="left")
+        self.similarity_entry = ctk.CTkEntry(similarity_row, width=60, fg_color=COLOR_PANEL)
+        self.similarity_entry.insert(0, str(self.cfg.get("similarity", 98)))
+        self.similarity_entry.bind("<FocusOut>", lambda e: self._clamp_similarity())
+        self.similarity_entry.pack(side="left", padx=(6, 0))
+
+        downsample_row = ctk.CTkFrame(right, fg_color="transparent")
+        downsample_row.pack(fill="x", pady=(6, 0))
+        ctk.CTkLabel(downsample_row, text="Analyze", anchor="w", width=90).pack(side="left")
+        downsample_values_by_label = {label: value for value, label in DOWNSAMPLE_LABELS}
+        self.downsample_var = ctk.StringVar(
+            value=self._downsample_to_label(str(self.cfg.get("downsample", 1)))
+        )
+        self.downsample_menu = ctk.CTkOptionMenu(
+            downsample_row, values=[label for _, label in DOWNSAMPLE_LABELS],
+            variable=self.downsample_var, width=170,
+            fg_color=COLOR_ACCENT, button_color=COLOR_ACCENT_HOVER,
+            button_hover_color=COLOR_ACCENT,
+            command=lambda label: self.downsample_var.set(label),
+        )
+        self.downsample_menu.pack(side="left", padx=(6, 0))
+
+        self.limit_search_var = ctk.BooleanVar(value=bool(self.cfg.get("search_stop", "")))
+        ctk.CTkCheckBox(
+            right, text="Limit search window", variable=self.limit_search_var,
+            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
+            command=self._on_limit_search_toggled,
+        ).pack(anchor="w", pady=(8, 4))
+
+        search_row = ctk.CTkFrame(right, fg_color="transparent")
+        search_row.pack(fill="x")
+        search_start_col = ctk.CTkFrame(search_row, fg_color="transparent")
+        search_start_col.pack(side="left")
+        ctk.CTkLabel(search_start_col, text="From (H:M:S)", anchor="w").pack(fill="x")
+        self.search_start_entry = _TimeEntry(
+            search_start_col, initial=self.cfg.get("search_start", "00:00:00")
+        )
+        self.search_start_entry.pack(anchor="w")
+
+        search_stop_col = ctk.CTkFrame(search_row, fg_color="transparent")
+        search_stop_col.pack(side="left", padx=(16, 0))
+        ctk.CTkLabel(search_stop_col, text="To (H:M:S)", anchor="w").pack(fill="x")
+        self.search_stop_entry = _TimeEntry(
+            search_stop_col, initial=self.cfg.get("search_stop") or "00:01:00"
+        )
+        self.search_stop_entry.pack(anchor="w")
+        self._toggle_search_fields()
+        self._toggle_loop_fields()
 
         loop_row = ctk.CTkFrame(right, fg_color="transparent")
         loop_row.pack(fill="x", pady=(10, 0))
@@ -521,6 +588,40 @@ class LoopClipApp(ctk.CTk):
                 return key
         return "15"
 
+    def _loop_method_to_label(self, value: str) -> str:
+        for key, label in LOOP_METHOD_LABELS:
+            if key == value:
+                return label
+        return "Combined (recommended)"
+
+    def _label_to_loop_method(self, label: str) -> str:
+        for key, lbl in LOOP_METHOD_LABELS:
+            if lbl == label:
+                return key
+        return "combined"
+
+    def _downsample_to_label(self, value: str) -> str:
+        for key, label in DOWNSAMPLE_LABELS:
+            if key == value:
+                return label
+        return "Every frame"
+
+    def _label_to_downsample(self, label: str) -> str:
+        for key, lbl in DOWNSAMPLE_LABELS:
+            if lbl == label:
+                return key
+        return "1"
+
+    def _clamp_similarity(self):
+        value = self.similarity_entry.get().strip()
+        try:
+            num = max(0, min(100, float(value)))
+        except ValueError:
+            num = 98
+        self.similarity_entry.delete(0, "end")
+        self.similarity_entry.insert(0, str(num))
+        self._update_size_estimate()
+
     def _crossfade_to_label(self, value: str) -> str:
         for key, label in CROSSFADE_LABELS:
             if key == value:
@@ -541,18 +642,28 @@ class LoopClipApp(ctk.CTk):
         state = "disabled" if self.no_audio_var.get() else "normal"
         self.audio_bitrate_menu.configure(state=state)
 
-    def _toggle_trim_fields(self):
-        state = "normal" if self.trim_var.get() else "disabled"
-        self.start_entry.configure_state(state)
-        self.duration_entry.configure_state(state)
+    def _toggle_loop_fields(self):
+        state = "normal" if self.auto_loop_var.get() else "disabled"
+        self.loop_method_menu.configure(state=state)
+        self.similarity_entry.configure(state=state)
+        self.downsample_menu.configure(state=state)
+        self._toggle_search_fields()
+
+    def _toggle_search_fields(self):
+        state = "normal" if (self.auto_loop_var.get() and self.limit_search_var.get()) else "disabled"
+        self.search_start_entry.configure_state(state)
+        self.search_stop_entry.configure_state(state)
 
     def _on_audio_option_changed(self):
         self._toggle_audio_fields()
         self._update_size_estimate()
 
-    def _on_trim_toggled(self):
-        self._toggle_trim_fields()
+    def _on_auto_loop_toggled(self):
+        self._toggle_loop_fields()
         self._update_size_estimate()
+
+    def _on_limit_search_toggled(self):
+        self._toggle_search_fields()
 
     def _on_seamless_loop_toggled(self):
         self._toggle_crossfade_field()
@@ -560,39 +671,23 @@ class LoopClipApp(ctk.CTk):
 
     def _update_size_estimate(self):
         """
-        Live estimate of the final output file's size, shown under the
-        trim/loop controls. Only possible to estimate when trim is
-        enabled (that's what fixes the output duration) - with no trim,
-        the source video's own length isn't known ahead of time, so we
-        just say so rather than showing a number.
+        Duration is no longer known ahead of time when auto loop-detection
+        is on (it depends on where the analysis finds the loop), so this
+        just shows an informational note rather than a computed estimate.
         """
         if not hasattr(self, "size_estimate_label"):
             return  # called before the label exists yet (initial setup order)
 
-        if not self.trim_var.get():
-            self.size_estimate_label.configure(text="Full video length - final size varies.")
-            return
-
-        try:
-            duration_seconds = processor.hms_to_seconds(self.duration_entry.get())
-        except (ValueError, AttributeError):
-            self.size_estimate_label.configure(text="")
-            return
-
-        if self.seamless_loop_var.get():
-            crossfade = int(self._label_to_crossfade(self.crossfade_var.get()))
-            duration_seconds = max(0, duration_seconds - crossfade)
-
-        video_mbps = int(self._label_to_video_bitrate(self.video_bitrate_var.get()))
-        if self.no_audio_var.get():
-            audio_kbps = 0
+        if self.auto_loop_var.get():
+            video_mbps = self._label_to_video_bitrate(self.video_bitrate_var.get())
+            self.size_estimate_label.configure(
+                text=(
+                    f"Loop length is determined automatically during analysis "
+                    f"(~{video_mbps} Mbps once found)."
+                )
+            )
         else:
-            audio_bitrate = self._label_to_bitrate(self.audio_bitrate_var.get())
-            audio_kbps = 192 if audio_bitrate == "original" else int(audio_bitrate)
-
-        total_bits = (video_mbps * 1_000_000 + audio_kbps * 1000) * duration_seconds
-        total_mb = total_bits / 8 / 1_000_000
-        self.size_estimate_label.configure(text=f"Estimated output size: ~{total_mb:.0f} MB")
+            self.size_estimate_label.configure(text="Full video length - final size varies.")
 
     def _browse_folder(self):
         folder = filedialog.askdirectory(initialdir=self.folder_entry.get() or str(Path.home()))
@@ -717,23 +812,42 @@ class LoopClipApp(ctk.CTk):
     def _set_progress(self, fraction: float):
         self.progress_bar.set(max(0.0, min(1.0, fraction)))
 
-    def _validate_trim_values(self) -> bool:
-        if not self.trim_var.get():
+    def _validate_loop_settings(self) -> bool:
+        if not self.auto_loop_var.get():
             return True
-        start = self.start_entry.get().strip()
-        duration = self.duration_entry.get().strip()
-        if not processor.validate_hms(start):
+
+        try:
+            similarity = float(self.similarity_entry.get().strip())
+            if not (0 <= similarity <= 100):
+                raise ValueError
+        except ValueError:
             messagebox.showerror(
-                "Invalid Start Time",
-                f"'{start}' is not a valid start time.\nPlease use the format HH:MM:SS, "
-                "e.g. 00:05:00.",
+                "Invalid Similarity",
+                "Similarity must be a number between 0 and 100.",
             )
             return False
-        if not processor.validate_hms(duration):
+
+        if not self.limit_search_var.get():
+            return True
+
+        start = self.search_start_entry.get().strip()
+        stop = self.search_stop_entry.get().strip()
+        if not processor.validate_hms(start):
             messagebox.showerror(
-                "Invalid Duration",
-                f"'{duration}' is not a valid duration.\nPlease use the format HH:MM:SS, "
-                "e.g. 00:15:00.",
+                "Invalid Search Start",
+                f"'{start}' is not a valid time.\nPlease use the format HH:MM:SS.",
+            )
+            return False
+        if not processor.validate_hms(stop):
+            messagebox.showerror(
+                "Invalid Search End",
+                f"'{stop}' is not a valid time.\nPlease use the format HH:MM:SS.",
+            )
+            return False
+        if processor.hms_to_seconds(stop) <= processor.hms_to_seconds(start):
+            messagebox.showerror(
+                "Invalid Search Window",
+                "The search window's end time must be after its start time.",
             )
             return False
         return True
@@ -767,7 +881,7 @@ class LoopClipApp(ctk.CTk):
             messagebox.showerror("Folder Error", "The output folder path is not valid.")
             return
 
-        if not self._validate_trim_values():
+        if not self._validate_loop_settings():
             return
 
         duplicates = [u for u in valid_urls if self.queue_manager.has_url(u)]
@@ -787,9 +901,18 @@ class LoopClipApp(ctk.CTk):
                 no_audio=self.no_audio_var.get(),
                 audio_bitrate=self._label_to_bitrate(self.audio_bitrate_var.get()),
                 video_bitrate=self._label_to_video_bitrate(self.video_bitrate_var.get()),
-                trim_enabled=self.trim_var.get(),
-                trim_start=self.start_entry.get().strip(),
-                trim_duration=self.duration_entry.get().strip(),
+                auto_loop=self.auto_loop_var.get(),
+                loop_method=self._label_to_loop_method(self.loop_method_var.get()),
+                similarity=float(self.similarity_entry.get().strip() or 98),
+                search_start=(
+                    self.search_start_entry.get().strip() if self.limit_search_var.get() else "00:00:00"
+                ),
+                search_stop=(
+                    self.search_stop_entry.get().strip() if self.limit_search_var.get() else ""
+                ),
+                downsample=int(self._label_to_downsample(self.downsample_var.get())),
+                min_loop_seconds=None,
+                max_loop_seconds=None,
                 output_folder=output_folder,
                 delete_original=self.delete_original_var.get(),
                 seamless_loop=self.seamless_loop_var.get(),
@@ -858,9 +981,16 @@ class LoopClipApp(ctk.CTk):
             "no_audio": self.no_audio_var.get(),
             "audio_bitrate": self._label_to_bitrate(self.audio_bitrate_var.get()),
             "video_bitrate": self._label_to_video_bitrate(self.video_bitrate_var.get()),
-            "trim_enabled": self.trim_var.get(),
-            "trim_start": self.start_entry.get().strip(),
-            "trim_duration": self.duration_entry.get().strip(),
+            "auto_loop": self.auto_loop_var.get(),
+            "loop_method": self._label_to_loop_method(self.loop_method_var.get()),
+            "similarity": float(self.similarity_entry.get().strip() or 98),
+            "search_start": (
+                self.search_start_entry.get().strip() if self.limit_search_var.get() else "00:00:00"
+            ),
+            "search_stop": (
+                self.search_stop_entry.get().strip() if self.limit_search_var.get() else ""
+            ),
+            "downsample": int(self._label_to_downsample(self.downsample_var.get())),
             "delete_original": self.delete_original_var.get(),
             "open_folder_when_finished": self.open_folder_var.get(),
             "seamless_loop": self.seamless_loop_var.get(),
@@ -998,7 +1128,9 @@ class LoopClipApp(ctk.CTk):
 
         # Only pack/unpack the extra area (progress bar or message) when the
         # kind of content actually needs to change - not on every refresh.
-        if item.state in (QueueState.DOWNLOADING, QueueState.TRIMMING, QueueState.LOOPING):
+        if item.state in (
+            QueueState.DOWNLOADING, QueueState.ANALYZING, QueueState.TRIMMING, QueueState.LOOPING,
+        ):
             if widgets["shown_extra"] != "detail":
                 widgets["message_label"].pack_forget()
                 widgets["detail"].pack(fill="x", padx=10, pady=(0, 8))
@@ -1028,7 +1160,9 @@ class LoopClipApp(ctk.CTk):
 
     def _refresh_status_and_progress(self, items):
         active = next(
-            (i for i in items if i.state in (QueueState.DOWNLOADING, QueueState.TRIMMING)), None
+            (i for i in items
+             if i.state in (QueueState.DOWNLOADING, QueueState.ANALYZING, QueueState.TRIMMING)),
+            None,
         )
         if active is not None:
             idx = items.index(active) + 1

@@ -58,20 +58,47 @@ def seconds_to_hms(total_seconds: int) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+def seconds_to_ffmpeg_time(total_seconds: float) -> str:
+    """
+    Converts a (possibly fractional) seconds value to 'HH:MM:SS.mmm', which
+    FFmpeg's -ss/-t accept directly. Used for loop points coming out of
+    loop_detector, which are frame-accurate rather than whole-second - a
+    plain seconds_to_hms() would silently truncate them back to the
+    nearest second and lose that precision.
+    """
+    total_seconds = max(0.0, float(total_seconds))
+    whole = int(total_seconds)
+    ms = round((total_seconds - whole) * 1000)
+    if ms == 1000:  # rounding carried into the next second
+        whole += 1
+        ms = 0
+    h, remainder = divmod(whole, 3600)
+    m, s = divmod(remainder, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+
 def sanitize_title(title: str) -> str:
     """Removes characters that are illegal in Windows filenames."""
     return re.sub(r'[\\/:*?"<>|]', "", title).strip()
 
 
-def build_output_filename(title: str, duration_hms: str) -> str:
+def build_output_filename(title: str, duration_seconds: float) -> str:
     """
     Builds the final output filename, e.g.:
     'Wide Fantasy Valley Aquascape 3hours HDR.mp4'
-      -> 'Wide Fantasy Valley Aquascape 3hours HDR - 15min.mp4'
+      -> 'Wide Fantasy Valley Aquascape 3hours HDR - 15s loop.mp4'
+
+    Takes duration in seconds (not an HH:MM:SS string) since detected loop
+    durations are fractional; shown in whole seconds for short loops and
+    minutes for longer ones, rounded for readability.
     """
     clean_title = sanitize_title(title)
-    minutes = hms_to_seconds(duration_hms) // 60
-    return f"{clean_title} - {minutes}min.mp4"
+    duration_seconds = max(0, round(duration_seconds))
+    if duration_seconds < 60:
+        length_label = f"{duration_seconds}s loop"
+    else:
+        length_label = f"{duration_seconds // 60}min loop"
+    return f"{clean_title} - {length_label}.mp4"
 
 
 def _audio_args(audio_bitrate: str, no_audio: bool) -> list:

@@ -16,12 +16,14 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import downloader
+import loop_detector
 import processor
 
 
 class QueueState:
     QUEUED = "Queued"
     DOWNLOADING = "Downloading"
+    ANALYZING = "Analyzing"
     TRIMMING = "Trimming"
     LOOPING = "Creating Loop"
     FINISHED = "Finished"
@@ -36,9 +38,17 @@ class QueueItem:
     no_audio: bool
     audio_bitrate: str
     video_bitrate: str
-    trim_enabled: bool
-    trim_start: str
-    trim_duration: str
+
+    # Auto loop-detection settings (LoopyCut-style), replacing manual trim.
+    auto_loop: bool
+    loop_method: str            # "combined" | "ssim" | "histogram" | "hash"
+    similarity: float           # 0-100
+    search_start: str           # "HH:MM:SS" - start of the window to analyze
+    search_stop: str            # "HH:MM:SS", or "" to search to the end of the video
+    downsample: int             # analyze every Nth frame
+    min_loop_seconds: Optional[float]  # None = auto
+    max_loop_seconds: Optional[float]  # None = auto
+
     output_folder: str
     delete_original: bool
     seamless_loop: bool
@@ -53,6 +63,7 @@ class QueueItem:
     error_message: str = ""
     output_name: str = ""
     title: str = ""
+    detected_loop: "Optional[loop_detector.LoopCandidate]" = None
 
 
 def _friendly_error(message: str) -> str:
@@ -65,6 +76,10 @@ def _friendly_error(message: str) -> str:
     if "ffmpeg reported an error" in low:
         # This is FFmpeg's own diagnostic output (not a raw Python
         # traceback), so it's safe and useful to show as-is.
+        return message
+    if "no seamless loop found" in low or "not enough frames" in low or "could not open video for analysis" in low:
+        # loop_detector's own messages are already user-friendly guidance
+        # (lower similarity / widen search window / try another method).
         return message
     if "could not locate the downloaded file" in low:
         return "The download finished but the file could not be located. Please try again."
@@ -91,22 +106,12 @@ _FREE_SPACE_SAFETY_MARGIN = 512 * 1024 ** 2  # 512 MB on top of any estimate
 def _estimate_output_bytes(item: "QueueItem") -> Optional[int]:
     """
     Rough estimate of the final output file's size in bytes, when it's
-    knowable in advance - only possible when trimming is enabled (so the
-    output duration is known). Returns None if it can't be estimated
-    (e.g. no trim - the source video's own duration isn't known until
-    it's actually downloaded).
+    knowable in advance. With auto loop-detection, the output duration
+    isn't known until the loop is actually found, so this returns None
+    (the disk-space check then just falls back to a conservative flat
+    minimum) rather than guessing.
     """
-    if not item.trim_enabled:
-        return None
-    duration_seconds = processor.hms_to_seconds(item.trim_duration)
-    if item.seamless_loop:
-        duration_seconds = max(0, duration_seconds - int(item.crossfade_seconds))
-    video_bits_per_sec = int(item.video_bitrate) * 1_000_000
-    audio_bits_per_sec = 0 if item.no_audio else (
-        192_000 if item.audio_bitrate == "original" else int(item.audio_bitrate) * 1000
-    )
-    total_bits = (video_bits_per_sec + audio_bits_per_sec) * duration_seconds
-    return total_bits // 8
+    return None
 
 
 def _check_disk_space(item: "QueueItem", temp_root: Path) -> Optional[str]:
@@ -309,26 +314,31 @@ class QueueManager:
 
         try:
             section_range = None
-            local_start_hms = item.trim_start
-            if item.trim_enabled:
-                # Only download the portion of the video actually needed,
-                # instead of the whole thing - this is what makes trimming
-                # a few minutes out of a multi-hour video fast. A padding
-                # buffer is added on each side so the local FFmpeg trim
-                # step below still has enough margin around the requested
-                # start/duration to make a clean, frame-accurate cut even
-                # if yt-dlp's own section cut landed a little early/late.
-                pad_seconds = 60
-                start_seconds = processor.hms_to_seconds(item.trim_start)
-                duration_seconds = processor.hms_to_seconds(item.trim_duration)
-                section_start = max(0, start_seconds - pad_seconds)
-                section_end = start_seconds + duration_seconds + pad_seconds
-                section_range = (section_start, section_end)
-                # The downloaded file's own timeline now starts at
-                # section_start, not at the original video's 0:00 - so the
-                # local trim step needs its start offset re-based to be
-                # relative to the (now much shorter) downloaded section.
-                local_start_hms = processor.seconds_to_hms(start_seconds - section_start)
+            search_offset = 0.0
+            if item.auto_loop:
+                # Only download the window that will actually be analyzed,
+                # instead of the whole video - same "don't fetch more than
+                # needed" idea as the old manual trim, just based on the
+                # search window instead of an exact start/duration. A
+                # padding buffer is added on each side so the analyzed
+                # window still has margin even if yt-dlp's section cut
+                # lands a little early/late. If no search window was set
+                # (search to the whole video), the full video is downloaded.
+                search_start_s = processor.hms_to_seconds(item.search_start)
+                search_stop_s = (
+                    processor.hms_to_seconds(item.search_stop) if item.search_stop else None
+                )
+                # A bounded section download (both start and stop known) is
+                # only possible - and only re-bases the downloaded file's
+                # timeline - when a stop time was actually given. An
+                # open-ended stop means the whole video is downloaded from
+                # 0:00, so the timeline offset stays 0 in that case.
+                if search_stop_s is not None:
+                    pad_seconds = 30
+                    section_start = max(0, search_start_s - pad_seconds)
+                    section_end = search_stop_s + pad_seconds
+                    section_range = (section_start, section_end)
+                    search_offset = section_start
 
             result = downloader.download_video(
                 url=item.url,
@@ -342,19 +352,61 @@ class QueueManager:
             )
             item.title = result.title
 
-            needs_ffmpeg = item.trim_enabled or (
+            local_start_seconds = 0.0
+            local_duration_seconds = None
+
+            if item.auto_loop:
+                item.state = QueueState.ANALYZING
+                item.operation = "Analyzing frames for a seamless loop..."
+                item.percent = 0.0
+                self._notify()
+
+                def on_analysis_progress(phase, done, total):
+                    item.percent = (done / total * 100.0) if total else 0.0
+                    item.operation = (
+                        "Extracting frames..." if phase == "extract" else "Comparing frames..."
+                    )
+                    self._notify()
+
+                # search_start/stop are relative to the *original* video;
+                # re-base them to the downloaded (possibly section-cut)
+                # file's own timeline before handing off to loop_detector.
+                analyze_start = max(0.0, processor.hms_to_seconds(item.search_start) - search_offset)
+                analyze_stop = (
+                    (processor.hms_to_seconds(item.search_stop) - search_offset)
+                    if item.search_stop else None
+                )
+
+                try:
+                    best = loop_detector.find_best_loop(
+                        result.filepath,
+                        start=analyze_start,
+                        stop=analyze_stop,
+                        method=item.loop_method,
+                        similarity_threshold=item.similarity,
+                        min_loop_seconds=item.min_loop_seconds,
+                        max_loop_seconds=item.max_loop_seconds,
+                        downsample=item.downsample,
+                        progress_callback=on_analysis_progress,
+                    )
+                except loop_detector.LoopDetectionError as exc:
+                    raise RuntimeError(str(exc)) from exc
+
+                item.detected_loop = best
+                local_start_seconds = best.start
+                local_duration_seconds = best.duration
+
+            needs_ffmpeg = item.auto_loop or (
                 not item.no_audio and item.audio_bitrate != "original"
             )
 
             if needs_ffmpeg:
                 item.state = QueueState.TRIMMING
-                item.operation = "Trimming..." if item.trim_enabled else "Processing audio..."
+                item.operation = "Trimming..." if item.auto_loop else "Processing audio..."
                 self._notify()
 
-                if item.trim_enabled:
-                    out_name = processor.build_output_filename(
-                        result.title, item.trim_duration
-                    )
+                if item.auto_loop:
+                    out_name = processor.build_output_filename(result.title, local_duration_seconds)
                 else:
                     out_name = f"{processor.sanitize_title(result.title)}.mp4"
                 out_path = str(Path(item.output_folder) / out_name)
@@ -362,9 +414,9 @@ class QueueManager:
                 processor.process_video(
                     input_path=result.filepath,
                     output_path=out_path,
-                    trim_enabled=item.trim_enabled,
-                    start_hms=local_start_hms,
-                    duration_hms=item.trim_duration,
+                    trim_enabled=item.auto_loop,
+                    start_hms=processor.seconds_to_ffmpeg_time(local_start_seconds),
+                    duration_hms=processor.seconds_to_ffmpeg_time(local_duration_seconds or 0),
                     audio_bitrate=item.audio_bitrate,
                     video_bitrate=item.video_bitrate,
                     no_audio=item.no_audio,
