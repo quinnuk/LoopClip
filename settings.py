@@ -15,6 +15,7 @@ _OLD_APP_NAME = "AquariumDownloader"  # pre-rename folder, for one-time migratio
 
 DEFAULTS = {
     "output_folder": r"C:\Projectivy\Screensavers\Aquariums",
+    "recent_output_folders": [],  # most-recent-first, capped at 5
     "quality": "best",  # "best" | "4k_hdr" | "1080p"
     "no_audio": False,
     "audio_bitrate": "original",  # "original" | "128" | "192" | "256" | "320"

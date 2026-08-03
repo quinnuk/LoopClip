@@ -76,7 +76,69 @@ def _friendly_error(message: str) -> str:
         return "This video is age-restricted and can't be downloaded without sign-in."
     if "urlopen" in low or "network" in low or "timed out" in low:
         return "The video could not be downloaded. Check your internet connection and try again."
+    if "no space left" in low or "disk full" in low or "not enough space" in low:
+        return "Ran out of disk space partway through. Free up some space and try again."
     return "The video could not be downloaded. Check the URL or try again."
+
+
+# Minimum free space to require even when the item's size can't be
+# estimated (e.g. no trim, so the full source video's size is unknown
+# up-front) - a conservative floor rather than a real estimate.
+_MIN_FREE_SPACE_BYTES = 2 * 1024 ** 3  # 2 GB
+_FREE_SPACE_SAFETY_MARGIN = 512 * 1024 ** 2  # 512 MB on top of any estimate
+
+
+def _estimate_output_bytes(item: "QueueItem") -> Optional[int]:
+    """
+    Rough estimate of the final output file's size in bytes, when it's
+    knowable in advance - only possible when trimming is enabled (so the
+    output duration is known). Returns None if it can't be estimated
+    (e.g. no trim - the source video's own duration isn't known until
+    it's actually downloaded).
+    """
+    if not item.trim_enabled:
+        return None
+    duration_seconds = processor.hms_to_seconds(item.trim_duration)
+    if item.seamless_loop:
+        duration_seconds = max(0, duration_seconds - int(item.crossfade_seconds))
+    video_bits_per_sec = int(item.video_bitrate) * 1_000_000
+    audio_bits_per_sec = 0 if item.no_audio else (
+        192_000 if item.audio_bitrate == "original" else int(item.audio_bitrate) * 1000
+    )
+    total_bits = (video_bits_per_sec + audio_bits_per_sec) * duration_seconds
+    return total_bits // 8
+
+
+def _check_disk_space(item: "QueueItem", temp_root: Path) -> Optional[str]:
+    """
+    Checks that there's likely enough free space to complete this item,
+    on both the output folder's drive and the temp folder's drive (they
+    may be different drives). Returns an error message string if space
+    looks insufficient, or None if it's fine to proceed.
+
+    This is a best-effort pre-flight check, not a guarantee - actual
+    usage during download can still vary, which is why _friendly_error
+    above also recognizes an actual "no space left" failure if one
+    happens anyway.
+    """
+    estimated = _estimate_output_bytes(item)
+    required = (estimated or _MIN_FREE_SPACE_BYTES) + _FREE_SPACE_SAFETY_MARGIN
+
+    for label, path in (("output folder", item.output_folder), ("temp folder", str(temp_root))):
+        try:
+            Path(path).mkdir(parents=True, exist_ok=True)
+            free = shutil.disk_usage(path).free
+        except OSError:
+            continue  # Can't check this one - don't block on it.
+        if free < required:
+            free_gb = free / 1024 ** 3
+            required_gb = required / 1024 ** 3
+            return (
+                f"Not enough free disk space on the drive for your {label} "
+                f"({free_gb:.1f} GB free, roughly {required_gb:.1f} GB needed). "
+                "Free up some space and try again."
+            )
+    return None
 
 
 class QueueManager:
@@ -121,6 +183,48 @@ class QueueManager:
             self.items.clear()
         self._notify()
         return True
+
+    def remove_item(self, item_id: str) -> bool:
+        """
+        Removes a single item from the queue, but only if it's still
+        QUEUED (hasn't started downloading/processing yet) - removing an
+        item that's actively in progress isn't safe without also killing
+        whatever FFmpeg/yt-dlp process is working on it. Returns True if
+        removed, False if the item wasn't found or wasn't safe to remove.
+        """
+        with self._lock:
+            for i, item in enumerate(self.items):
+                if item.id == item_id and item.state == QueueState.QUEUED:
+                    del self.items[i]
+                    self._notify()
+                    return True
+        return False
+
+    def retry_item(self, item_id: str) -> bool:
+        """
+        Resets a failed (or cancelled) item back to QUEUED so it will be
+        picked up again - either immediately, if the queue is still
+        running and simply hasn't reached the end yet, or the next time
+        Start Queue is clicked. Returns True if the item was reset, False
+        if it wasn't found or wasn't in a retryable state.
+        """
+        with self._lock:
+            for item in self.items:
+                if item.id == item_id and item.state in (QueueState.ERROR, QueueState.CANCELLED):
+                    item.state = QueueState.QUEUED
+                    item.operation = "Queued"
+                    item.percent = 0.0
+                    item.speed = "-"
+                    item.eta = "-"
+                    item.error_message = ""
+                    self._notify()
+                    return True
+        return False
+
+    def has_url(self, url: str) -> bool:
+        """Whether this URL is already present in the queue (any state)."""
+        with self._lock:
+            return any(item.url == url for item in self.items)
 
     def start(self):
         """Starts the worker thread if it isn't already running."""
@@ -176,6 +280,14 @@ class QueueManager:
         self._notify()
 
     def _process_item(self, item: QueueItem):
+        space_error = _check_disk_space(item, self._temp_root)
+        if space_error:
+            item.state = QueueState.ERROR
+            item.error_message = space_error
+            item.operation = "Error"
+            self._notify()
+            return
+
         item.state = QueueState.DOWNLOADING
         item.operation = "Downloading..."
         item.percent = 0.0
@@ -196,11 +308,34 @@ class QueueManager:
             self._notify()
 
         try:
+            section_range = None
+            local_start_hms = item.trim_start
+            if item.trim_enabled:
+                # Only download the portion of the video actually needed,
+                # instead of the whole thing - this is what makes trimming
+                # a few minutes out of a multi-hour video fast. A padding
+                # buffer is added on each side so the local FFmpeg trim
+                # step below still has enough margin around the requested
+                # start/duration to make a clean, frame-accurate cut even
+                # if yt-dlp's own section cut landed a little early/late.
+                pad_seconds = 60
+                start_seconds = processor.hms_to_seconds(item.trim_start)
+                duration_seconds = processor.hms_to_seconds(item.trim_duration)
+                section_start = max(0, start_seconds - pad_seconds)
+                section_end = start_seconds + duration_seconds + pad_seconds
+                section_range = (section_start, section_end)
+                # The downloaded file's own timeline now starts at
+                # section_start, not at the original video's 0:00 - so the
+                # local trim step needs its start offset re-based to be
+                # relative to the (now much shorter) downloaded section.
+                local_start_hms = processor.seconds_to_hms(start_seconds - section_start)
+
             result = downloader.download_video(
                 url=item.url,
                 temp_dir=str(temp_dir),
                 quality=item.quality,
                 no_audio=item.no_audio,
+                section_range_seconds=section_range,
                 progress_callback=on_progress,
                 process_holder=self._current_process,
                 cancel_check=self._is_cancelled,
@@ -228,7 +363,7 @@ class QueueManager:
                     input_path=result.filepath,
                     output_path=out_path,
                     trim_enabled=item.trim_enabled,
-                    start_hms=item.trim_start,
+                    start_hms=local_start_hms,
                     duration_hms=item.trim_duration,
                     audio_bitrate=item.audio_bitrate,
                     video_bitrate=item.video_bitrate,

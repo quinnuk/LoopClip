@@ -13,10 +13,12 @@ two-column options layout with a segmented quality selector):
   5. "Cancel" stops the current video immediately and halts the queue.
 """
 
+import json
 import os
 import tempfile
 import threading
 import time
+import urllib.request
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -106,8 +108,9 @@ class _TimeEntry(ctk.CTkFrame):
     the rest of the app doesn't need to change.
     """
 
-    def __init__(self, master, initial: str = "00:00:00", **kwargs):
+    def __init__(self, master, initial: str = "00:00:00", on_change=None, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
+        self._on_change = on_change
         vcmd = (self.register(self._validate_digits), "%P")
 
         box_kwargs = dict(
@@ -132,11 +135,16 @@ class _TimeEntry(ctk.CTkFrame):
 
         self.set(initial)
 
-        self.hh.bind("<KeyRelease>", lambda e: self._maybe_advance(self.hh, self.mm))
-        self.mm.bind("<KeyRelease>", lambda e: self._maybe_advance(self.mm, self.ss))
-        self.hh.bind("<FocusOut>", lambda e: self._pad(self.hh))
-        self.mm.bind("<FocusOut>", lambda e: self._clamp(self.mm))
-        self.ss.bind("<FocusOut>", lambda e: self._clamp(self.ss))
+        def _changed(e=None):
+            if self._on_change is not None:
+                self._on_change()
+
+        self.hh.bind("<KeyRelease>", lambda e: (self._maybe_advance(self.hh, self.mm), _changed()))
+        self.mm.bind("<KeyRelease>", lambda e: (self._maybe_advance(self.mm, self.ss), _changed()))
+        self.ss.bind("<KeyRelease>", _changed)
+        self.hh.bind("<FocusOut>", lambda e: (self._pad(self.hh), _changed()))
+        self.mm.bind("<FocusOut>", lambda e: (self._clamp(self.mm), _changed()))
+        self.ss.bind("<FocusOut>", lambda e: (self._clamp(self.ss), _changed()))
 
     @staticmethod
     def _validate_digits(proposed: str) -> bool:
@@ -211,6 +219,9 @@ class LoopClipApp(ctk.CTk):
         if missing:
             self.after(300, lambda: messagebox.showwarning("Missing requirements", missing))
 
+        self.update_notice_label = None  # created lazily, only if an update is found
+        threading.Thread(target=self._check_yt_dlp_update, daemon=True).start()
+
     def _set_app_icon(self):
         """Sets the window/taskbar icon from icon.ico if it's present next
         to main.py. Missing or unreadable icon files are non-fatal - the
@@ -221,6 +232,48 @@ class LoopClipApp(ctk.CTk):
                 self.iconbitmap(str(icon_path))
             except tk.TclError:
                 pass
+
+    def _check_yt_dlp_update(self):
+        """
+        Runs on a background thread at startup (never blocks the UI).
+        Checks whether a newer yt-dlp is available on PyPI - this matters
+        because YouTube changes things fairly often, and an outdated
+        yt-dlp is the single most common reason downloads suddenly start
+        failing. Never raises - any failure here (no internet, PyPI
+        unreachable, etc.) is silently ignored, since this is a
+        nice-to-have notice, not something that should ever interrupt
+        the app.
+        """
+        try:
+            req = urllib.request.Request(
+                "https://pypi.org/pypi/yt-dlp/json",
+                headers={"User-Agent": "LoopClip-UpdateCheck/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.load(resp)
+            latest = data["info"]["version"]
+            installed = downloader.get_installed_version()
+
+            def version_tuple(v):
+                return tuple(int(p) for p in v.split("."))
+
+            if version_tuple(latest) > version_tuple(installed):
+                self.after(0, lambda: self._show_update_notice(installed, latest))
+        except Exception:
+            pass  # Best-effort only - never surface this to the user as an error.
+
+    def _show_update_notice(self, installed: str, latest: str):
+        if self.update_notice_label is not None:
+            return  # already shown
+        self.update_notice_label = ctk.CTkLabel(
+            self,
+            text=(
+                f"A newer yt-dlp is available ({installed} -> {latest}). "
+                "Run: pip install -U yt-dlp"
+            ),
+            font=ctk.CTkFont(size=11), text_color="#E8A33D",
+        )
+        self.update_notice_label.pack(pady=(0, 4))
 
     # ------------------------------------------------------------------ UI
 
@@ -268,6 +321,11 @@ class LoopClipApp(ctk.CTk):
             folder_row, text="Browse", width=68, fg_color=COLOR_ACCENT,
             hover_color=COLOR_ACCENT_HOVER, command=self._browse_folder,
         ).pack(side="left", padx=(6, 0))
+        self.recent_folders_btn = ctk.CTkButton(
+            folder_row, text="Recent", width=68, fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOVER, command=self._show_recent_folders_menu,
+        )
+        self.recent_folders_btn.pack(side="left", padx=(6, 0))
 
         # Download quality (left column) - segmented button, same control
         # style as Video Downloader Pro's quality selector.
@@ -298,13 +356,14 @@ class LoopClipApp(ctk.CTk):
             variable=self.video_bitrate_var,
             width=110, fg_color=COLOR_ACCENT, button_color=COLOR_ACCENT_HOVER,
             button_hover_color=COLOR_ACCENT,
+            command=lambda _label: self._update_size_estimate(),
         ).pack(side="left", padx=(19, 0))
 
         self.no_audio_var = ctk.BooleanVar(value=self.cfg.get("no_audio", False))
         ctk.CTkCheckBox(
             left, text="No sound (mute video)", variable=self.no_audio_var,
             fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
-            command=self._toggle_audio_fields,
+            command=self._on_audio_option_changed,
         ).pack(anchor="w", pady=(5, 0))
 
         bitrate_row = ctk.CTkFrame(left, fg_color="transparent")
@@ -319,6 +378,7 @@ class LoopClipApp(ctk.CTk):
             variable=self.audio_bitrate_var,
             width=110, fg_color=COLOR_ACCENT, button_color=COLOR_ACCENT_HOVER,
             button_hover_color=COLOR_ACCENT,
+            command=lambda _label: self._update_size_estimate(),
         )
         self.audio_bitrate_menu.pack(side="left", padx=(8, 0))
         self._toggle_audio_fields()
@@ -329,7 +389,7 @@ class LoopClipApp(ctk.CTk):
         ctk.CTkCheckBox(
             right, text="Trim video automatically", variable=self.trim_var,
             fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
-            command=self._toggle_trim_fields,
+            command=self._on_trim_toggled,
         ).pack(anchor="w", pady=(2, 6))
 
         trim_row = ctk.CTkFrame(right, fg_color="transparent")
@@ -343,7 +403,10 @@ class LoopClipApp(ctk.CTk):
         dur_col = ctk.CTkFrame(trim_row, fg_color="transparent")
         dur_col.pack(side="left", padx=(16, 0))
         ctk.CTkLabel(dur_col, text="Duration (H:M:S)", anchor="w").pack(fill="x")
-        self.duration_entry = _TimeEntry(dur_col, initial=self.cfg.get("trim_duration", "00:15:00"))
+        self.duration_entry = _TimeEntry(
+            dur_col, initial=self.cfg.get("trim_duration", "00:15:00"),
+            on_change=lambda: self._update_size_estimate(),
+        )
         self.duration_entry.pack(anchor="w")
         self._toggle_trim_fields()
 
@@ -353,7 +416,7 @@ class LoopClipApp(ctk.CTk):
         ctk.CTkCheckBox(
             loop_row, text="Seamless loop crossfade", variable=self.seamless_loop_var,
             fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
-            command=self._toggle_crossfade_field,
+            command=self._on_seamless_loop_toggled,
         ).pack(side="left")
         self.crossfade_var = ctk.StringVar(
             value=self._crossfade_to_label(self.cfg.get("crossfade_seconds", "2"))
@@ -363,9 +426,16 @@ class LoopClipApp(ctk.CTk):
             variable=self.crossfade_var, width=80,
             fg_color=COLOR_ACCENT, button_color=COLOR_ACCENT_HOVER,
             button_hover_color=COLOR_ACCENT,
+            command=lambda _label: self._update_size_estimate(),
         )
         self.crossfade_menu.pack(side="left", padx=(8, 0))
         self._toggle_crossfade_field()
+
+        self.size_estimate_label = ctk.CTkLabel(
+            right, text="", anchor="w", font=ctk.CTkFont(size=11), text_color="gray60",
+        )
+        self.size_estimate_label.pack(fill="x", pady=(6, 0))
+        self._update_size_estimate()
 
         # After download (right column)
         ctk.CTkLabel(right, text="After Download", anchor="w").pack(fill="x", pady=(12, 0))
@@ -476,11 +546,86 @@ class LoopClipApp(ctk.CTk):
         self.start_entry.configure_state(state)
         self.duration_entry.configure_state(state)
 
+    def _on_audio_option_changed(self):
+        self._toggle_audio_fields()
+        self._update_size_estimate()
+
+    def _on_trim_toggled(self):
+        self._toggle_trim_fields()
+        self._update_size_estimate()
+
+    def _on_seamless_loop_toggled(self):
+        self._toggle_crossfade_field()
+        self._update_size_estimate()
+
+    def _update_size_estimate(self):
+        """
+        Live estimate of the final output file's size, shown under the
+        trim/loop controls. Only possible to estimate when trim is
+        enabled (that's what fixes the output duration) - with no trim,
+        the source video's own length isn't known ahead of time, so we
+        just say so rather than showing a number.
+        """
+        if not hasattr(self, "size_estimate_label"):
+            return  # called before the label exists yet (initial setup order)
+
+        if not self.trim_var.get():
+            self.size_estimate_label.configure(text="Full video length - final size varies.")
+            return
+
+        try:
+            duration_seconds = processor.hms_to_seconds(self.duration_entry.get())
+        except (ValueError, AttributeError):
+            self.size_estimate_label.configure(text="")
+            return
+
+        if self.seamless_loop_var.get():
+            crossfade = int(self._label_to_crossfade(self.crossfade_var.get()))
+            duration_seconds = max(0, duration_seconds - crossfade)
+
+        video_mbps = int(self._label_to_video_bitrate(self.video_bitrate_var.get()))
+        if self.no_audio_var.get():
+            audio_kbps = 0
+        else:
+            audio_bitrate = self._label_to_bitrate(self.audio_bitrate_var.get())
+            audio_kbps = 192 if audio_bitrate == "original" else int(audio_bitrate)
+
+        total_bits = (video_mbps * 1_000_000 + audio_kbps * 1000) * duration_seconds
+        total_mb = total_bits / 8 / 1_000_000
+        self.size_estimate_label.configure(text=f"Estimated output size: ~{total_mb:.0f} MB")
+
     def _browse_folder(self):
         folder = filedialog.askdirectory(initialdir=self.folder_entry.get() or str(Path.home()))
         if folder:
             self.folder_entry.delete(0, "end")
             self.folder_entry.insert(0, folder)
+
+    def _show_recent_folders_menu(self):
+        recent = self.cfg.get("recent_output_folders", [])
+        menu = tk.Menu(self, tearoff=0)
+        if not recent:
+            menu.add_command(label="(no recent folders yet)", state="disabled")
+        else:
+            for folder in recent:
+                menu.add_command(
+                    label=folder, command=lambda f=folder: self._use_recent_folder(f)
+                )
+        # Position the menu just under the button that opened it.
+        x = self.recent_folders_btn.winfo_rootx()
+        y = self.recent_folders_btn.winfo_rooty() + self.recent_folders_btn.winfo_height()
+        menu.tk_popup(x, y)
+
+    def _use_recent_folder(self, folder: str):
+        self.folder_entry.delete(0, "end")
+        self.folder_entry.insert(0, folder)
+
+    def _remember_output_folder(self, folder: str):
+        """Adds `folder` to the front of the recent-folders list (deduped,
+        capped at 5), called whenever a folder is actually used for a
+        successfully-queued download."""
+        recent = [f for f in self.cfg.get("recent_output_folders", []) if f != folder]
+        recent.insert(0, folder)
+        self.cfg["recent_output_folders"] = recent[:5]
 
     def _clear_url(self):
         self.url_entry.delete(0, "end")
@@ -594,8 +739,19 @@ class LoopClipApp(ctk.CTk):
         return True
 
     def _on_add_to_queue(self):
-        url = self.url_entry.get().strip()
-        if not downloader.is_valid_youtube_url(url):
+        raw = self.url_entry.get().strip()
+        if not raw:
+            messagebox.showerror("Invalid URL", "Please enter a valid YouTube URL.")
+            return
+
+        # Supports pasting several URLs at once (space or newline separated -
+        # a single-line entry collapses pasted newlines to spaces anyway, so
+        # splitting on whitespace handles both cases identically).
+        candidates = raw.split()
+        valid_urls = [u for u in candidates if downloader.is_valid_youtube_url(u)]
+        invalid_count = len(candidates) - len(valid_urls)
+
+        if not valid_urls:
             messagebox.showerror("Invalid URL", "Please enter a valid YouTube URL.")
             return
 
@@ -614,25 +770,42 @@ class LoopClipApp(ctk.CTk):
         if not self._validate_trim_values():
             return
 
-        item = QueueItem(
-            url=url,
-            quality=self.quality_var.get(),
-            no_audio=self.no_audio_var.get(),
-            audio_bitrate=self._label_to_bitrate(self.audio_bitrate_var.get()),
-            video_bitrate=self._label_to_video_bitrate(self.video_bitrate_var.get()),
-            trim_enabled=self.trim_var.get(),
-            trim_start=self.start_entry.get().strip(),
-            trim_duration=self.duration_entry.get().strip(),
-            output_folder=output_folder,
-            delete_original=self.delete_original_var.get(),
-            seamless_loop=self.seamless_loop_var.get(),
-            crossfade_seconds=self._label_to_crossfade(self.crossfade_var.get()),
-        )
-        self.queue_manager.add_item(item)
+        duplicates = [u for u in valid_urls if self.queue_manager.has_url(u)]
+        if duplicates:
+            word = "URL is" if len(duplicates) == 1 else "URLs are"
+            if not messagebox.askyesno(
+                "Already in Queue",
+                f"{len(duplicates)} {word} already in the queue. Add again anyway?",
+            ):
+                valid_urls = [u for u in valid_urls if u not in duplicates]
+
+        added = 0
+        for url in valid_urls:
+            item = QueueItem(
+                url=url,
+                quality=self.quality_var.get(),
+                no_audio=self.no_audio_var.get(),
+                audio_bitrate=self._label_to_bitrate(self.audio_bitrate_var.get()),
+                video_bitrate=self._label_to_video_bitrate(self.video_bitrate_var.get()),
+                trim_enabled=self.trim_var.get(),
+                trim_start=self.start_entry.get().strip(),
+                trim_duration=self.duration_entry.get().strip(),
+                output_folder=output_folder,
+                delete_original=self.delete_original_var.get(),
+                seamless_loop=self.seamless_loop_var.get(),
+                crossfade_seconds=self._label_to_crossfade(self.crossfade_var.get()),
+            )
+            self.queue_manager.add_item(item)
+            added += 1
+
+        self._remember_output_folder(output_folder)
         self._save_current_settings(output_folder)
 
         self.url_entry.delete(0, "end")
-        self._set_status(f"Added to queue ({len(self.queue_manager.items)} item(s) total).")
+        status = f"Added {added} item(s) to queue ({len(self.queue_manager.items)} total)."
+        if invalid_count:
+            status += f" Skipped {invalid_count} invalid entr{'y' if invalid_count == 1 else 'ies'}."
+        self._set_status(status)
 
     def _on_start_queue_clicked(self):
         if not any(i.state == QueueState.QUEUED for i in self.queue_manager.items):
@@ -669,6 +842,14 @@ class LoopClipApp(ctk.CTk):
             return
         self.queue_manager.clear_all()
         self._set_status("Queue cleared.")
+
+    def _on_remove_queue_item(self, item_id: str):
+        if self.queue_manager.remove_item(item_id):
+            self._set_status("Removed item from queue.")
+
+    def _on_retry_queue_item(self, item_id: str):
+        if self.queue_manager.retry_item(item_id):
+            self._set_status("Item re-queued.")
 
     def _save_current_settings(self, output_folder: str):
         self.cfg.update({
@@ -759,8 +940,11 @@ class LoopClipApp(ctk.CTk):
         top.pack(fill="x", padx=10, pady=(6, 2))
         name_label = ctk.CTkLabel(top, text="", anchor="w")
         name_label.pack(side="left", fill="x", expand=True)
+        action_btn = ctk.CTkButton(
+            top, text="", width=64, height=22, font=ctk.CTkFont(size=11), command=lambda: None,
+        )
         state_label = ctk.CTkLabel(top, text="", font=ctk.CTkFont(weight="bold"))
-        state_label.pack(side="right")
+        state_label.pack(side="right", padx=(8, 0))
 
         detail = ctk.CTkFrame(row, fg_color="transparent")
         bar = ctk.CTkProgressBar(detail, height=8, progress_color=COLOR_ACCENT)
@@ -774,6 +958,7 @@ class LoopClipApp(ctk.CTk):
 
         return {
             "frame": row, "name_label": name_label, "state_label": state_label,
+            "action_btn": action_btn, "action_kind": None,
             "detail": detail, "bar": bar, "info_label": info_label,
             "message_label": message_label, "shown_extra": None,
         }
@@ -787,9 +972,33 @@ class LoopClipApp(ctk.CTk):
             text=item.state, text_color=STATE_COLORS.get(item.state, "#FFFFFF")
         )
 
+        if item.state == QueueState.QUEUED:
+            desired_action = "remove"
+        elif item.state in (QueueState.ERROR, QueueState.CANCELLED):
+            desired_action = "retry"
+        else:
+            desired_action = None
+
+        if widgets["action_kind"] != desired_action:
+            widgets["action_kind"] = desired_action
+            if desired_action == "remove":
+                widgets["action_btn"].configure(
+                    text="Remove", fg_color=COLOR_CANCEL, hover_color=COLOR_CANCEL_HOVER,
+                    command=lambda item_id=item.id: self._on_remove_queue_item(item_id),
+                )
+                widgets["action_btn"].pack(side="right")
+            elif desired_action == "retry":
+                widgets["action_btn"].configure(
+                    text="Retry", fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
+                    command=lambda item_id=item.id: self._on_retry_queue_item(item_id),
+                )
+                widgets["action_btn"].pack(side="right")
+            else:
+                widgets["action_btn"].pack_forget()
+
         # Only pack/unpack the extra area (progress bar or message) when the
         # kind of content actually needs to change - not on every refresh.
-        if item.state in (QueueState.DOWNLOADING, QueueState.TRIMMING):
+        if item.state in (QueueState.DOWNLOADING, QueueState.TRIMMING, QueueState.LOOPING):
             if widgets["shown_extra"] != "detail":
                 widgets["message_label"].pack_forget()
                 widgets["detail"].pack(fill="x", padx=10, pady=(0, 8))

@@ -78,11 +78,17 @@ class DownloadResult:
         self.title = title
 
 
+def get_installed_version() -> str:
+    """The installed yt-dlp version string, e.g. '2026.07.04'."""
+    return yt_dlp.version.__version__
+
+
 def download_video(
     url: str,
     temp_dir: str,
     quality: str,
     no_audio: bool = False,
+    section_range_seconds: Optional[tuple] = None,
     progress_callback: Optional[Callable[[dict], None]] = None,
     process_holder: Optional[dict] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
@@ -90,6 +96,17 @@ def download_video(
     """
     Downloads the given YouTube URL into temp_dir using the selected
     quality mode. Returns the path (and title) of the downloaded file.
+
+    section_range_seconds, if given, is a (start_seconds, end_seconds)
+    tuple - only that portion of the video is downloaded (via yt-dlp's
+    download_sections), instead of the whole thing. This is what makes
+    trimming a few minutes out of a multi-hour video fast: yt-dlp only
+    fetches the needed range from YouTube's servers rather than the full
+    video, and force_keyframes_at_cuts asks it to re-mux for a clean cut
+    at those boundaries. The caller is expected to pass a slightly padded
+    range (a bit before/after the actual desired trim points) so the
+    existing local FFmpeg trim step afterward still has enough margin to
+    make a frame-accurate final cut.
 
     progress_callback receives a dict with keys like:
       status ('downloading' | 'finished')
@@ -144,6 +161,15 @@ def download_video(
         "quiet": True,
         "no_warnings": True,
     }
+
+    if section_range_seconds is not None:
+        start_s, end_s = section_range_seconds
+        ydl_opts["download_sections"] = [f"*{start_s}-{end_s}"]
+        # Asks yt-dlp to re-mux so the section boundaries land on clean
+        # cut points, rather than the nearest (possibly much earlier)
+        # keyframe - keeps the downloaded section tight to what was asked
+        # for instead of over-fetching.
+        ydl_opts["force_keyframes_at_cuts"] = True
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
