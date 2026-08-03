@@ -32,3 +32,4 @@ settings.json
 # OS cruft
 Thumbs.db
 desktop.ini
+dist/LoopClip.exe
