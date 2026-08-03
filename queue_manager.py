@@ -315,30 +315,30 @@ class QueueManager:
         try:
             section_range = None
             search_offset = 0.0
-            if item.auto_loop:
-                # Only download the window that will actually be analyzed,
-                # instead of the whole video - same "don't fetch more than
-                # needed" idea as the old manual trim, just based on the
-                # search window instead of an exact start/duration. A
-                # padding buffer is added on each side so the analyzed
-                # window still has margin even if yt-dlp's section cut
-                # lands a little early/late. If no search window was set
-                # (search to the whole video), the full video is downloaded.
-                search_start_s = processor.hms_to_seconds(item.search_start)
-                search_stop_s = (
-                    processor.hms_to_seconds(item.search_stop) if item.search_stop else None
-                )
-                # A bounded section download (both start and stop known) is
-                # only possible - and only re-bases the downloaded file's
-                # timeline - when a stop time was actually given. An
-                # open-ended stop means the whole video is downloaded from
-                # 0:00, so the timeline offset stays 0 in that case.
-                if search_stop_s is not None:
-                    pad_seconds = 30
-                    section_start = max(0, search_start_s - pad_seconds)
-                    section_end = search_stop_s + pad_seconds
-                    section_range = (section_start, section_end)
-                    search_offset = section_start
+            # Only download the window that's actually needed, instead of
+            # the whole video. This used to only apply when auto-loop
+            # detection was on, which meant ticking "Limit search window"
+            # by itself (with auto-loop off) silently did nothing and the
+            # full video was downloaded - now it applies whenever a search
+            # window is set, whether or not loop detection is also used.
+            # A padding buffer is added on each side so there's still
+            # margin for a frame-accurate local FFmpeg cut afterward, even
+            # if yt-dlp's section cut lands a little early/late.
+            search_start_s = processor.hms_to_seconds(item.search_start)
+            search_stop_s = (
+                processor.hms_to_seconds(item.search_stop) if item.search_stop else None
+            )
+            # A bounded section download (both start and stop known) is
+            # only possible - and only re-bases the downloaded file's
+            # timeline - when a stop time was actually given. An
+            # open-ended stop means the whole video is downloaded from
+            # 0:00, so the timeline offset stays 0 in that case.
+            if search_stop_s is not None:
+                pad_seconds = 30
+                section_start = max(0, search_start_s - pad_seconds)
+                section_end = search_stop_s + pad_seconds
+                section_range = (section_start, section_end)
+                search_offset = section_start
 
             result = downloader.download_video(
                 url=item.url,
@@ -396,16 +396,31 @@ class QueueManager:
                 local_start_seconds = best.start
                 local_duration_seconds = best.duration
 
-            needs_ffmpeg = item.auto_loop or (
+            # Manual trim: a search window was set but auto-loop detection
+            # is off, so there's no loop analysis to derive a cut point
+            # from - just cut exactly the window the user asked for. This
+            # is what makes "Limit search window" alone (no loop detection)
+            # actually produce a short clip instead of the full video.
+            manual_trim = (
+                not item.auto_loop
+                and section_range is not None
+                and search_stop_s is not None
+            )
+            if manual_trim:
+                local_start_seconds = max(0.0, search_start_s - search_offset)
+                local_duration_seconds = max(0.0, search_stop_s - search_start_s)
+
+            trim_enabled = item.auto_loop or manual_trim
+            needs_ffmpeg = trim_enabled or (
                 not item.no_audio and item.audio_bitrate != "original"
             )
 
             if needs_ffmpeg:
                 item.state = QueueState.TRIMMING
-                item.operation = "Trimming..." if item.auto_loop else "Processing audio..."
+                item.operation = "Trimming..." if trim_enabled else "Processing audio..."
                 self._notify()
 
-                if item.auto_loop:
+                if trim_enabled:
                     out_name = processor.build_output_filename(result.title, local_duration_seconds)
                 else:
                     out_name = f"{processor.sanitize_title(result.title)}.mp4"
@@ -414,7 +429,7 @@ class QueueManager:
                 processor.process_video(
                     input_path=result.filepath,
                     output_path=out_path,
-                    trim_enabled=item.auto_loop,
+                    trim_enabled=trim_enabled,
                     start_hms=processor.seconds_to_ffmpeg_time(local_start_seconds),
                     duration_hms=processor.seconds_to_ffmpeg_time(local_duration_seconds or 0),
                     audio_bitrate=item.audio_bitrate,

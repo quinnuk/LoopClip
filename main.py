@@ -650,7 +650,11 @@ class LoopClipApp(ctk.CTk):
         self._toggle_search_fields()
 
     def _toggle_search_fields(self):
-        state = "normal" if (self.auto_loop_var.get() and self.limit_search_var.get()) else "disabled"
+        # Independent of auto-loop: setting a search window and leaving
+        # auto-loop off now trims the clip to exactly that window (a
+        # fast, manual trim), rather than requiring loop detection to be
+        # on for the window to have any effect.
+        state = "normal" if self.limit_search_var.get() else "disabled"
         self.search_start_entry.configure_state(state)
         self.search_stop_entry.configure_state(state)
 
@@ -664,6 +668,7 @@ class LoopClipApp(ctk.CTk):
 
     def _on_limit_search_toggled(self):
         self._toggle_search_fields()
+        self._update_size_estimate()
 
     def _on_seamless_loop_toggled(self):
         self._toggle_crossfade_field()
@@ -685,6 +690,10 @@ class LoopClipApp(ctk.CTk):
                     f"Loop length is determined automatically during analysis "
                     f"(~{video_mbps} Mbps once found)."
                 )
+            )
+        elif self.limit_search_var.get():
+            self.size_estimate_label.configure(
+                text="Trimmed to the window set below - only that part is downloaded."
             )
         else:
             self.size_estimate_label.configure(text="Full video length - final size varies.")
@@ -813,19 +822,17 @@ class LoopClipApp(ctk.CTk):
         self.progress_bar.set(max(0.0, min(1.0, fraction)))
 
     def _validate_loop_settings(self) -> bool:
-        if not self.auto_loop_var.get():
-            return True
-
-        try:
-            similarity = float(self.similarity_entry.get().strip())
-            if not (0 <= similarity <= 100):
-                raise ValueError
-        except ValueError:
-            messagebox.showerror(
-                "Invalid Similarity",
-                "Similarity must be a number between 0 and 100.",
-            )
-            return False
+        if self.auto_loop_var.get():
+            try:
+                similarity = float(self.similarity_entry.get().strip())
+                if not (0 <= similarity <= 100):
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid Similarity",
+                    "Similarity must be a number between 0 and 100.",
+                )
+                return False
 
         if not self.limit_search_var.get():
             return True
