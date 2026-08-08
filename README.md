@@ -4,13 +4,19 @@
 
 **Download YouTube videos and turn them into seamless, looping 4K screensavers — automatically.**
 
-*(Formerly Aquarium Downloader)*
+
 
 ![Platform](https://img.shields.io/badge/platform-Windows%2011-0078D6)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 [![LoopClip Screenshot](https://github.com/quinnuk/LoopClip/raw/master/screenshot.png)](/quinnuk/LoopClip/blob/master/screenshot.png)
+
+<a href="https://buymeacoffee.com/quinnuk" target="_blank">
+  <img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="60" width="217">
+</a>
+
+<sub>If LoopClip saves you time, a coffee is always appreciated ☕</sub>
 
 </div>
 
@@ -34,6 +40,7 @@ It was originally built for **Projectivy Launcher** on a 4K TV, but works for an
 - [Project Structure](#project-structure)
 - [Quality Handling Notes](#quality-handling-notes)
 - [About the Rename](#about-the-rename)
+- [Support This Project](#support-this-project)
 - [License](#license)
 
 ## Features
@@ -213,6 +220,16 @@ LoopClip/
 ## About the Rename
 
 This project started life as **Aquarium Downloader**, aimed narrowly at aquarium screensaver footage. Since it works equally well for any looping background video, it's now **LoopClip**. If you're upgrading from an older Aquarium Downloader install, your existing settings carry over automatically on first run — nothing to do manually.
+
+## Support This Project
+
+LoopClip is free and built in my spare time — if it's useful to you, consider buying me a coffee.
+
+<p align="center">
+  <a href="https://buymeacoffee.com/quinnuk">
+    <img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee">
+  </a>
+</p>
 
 ## License
 
