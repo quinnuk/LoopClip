@@ -8,6 +8,7 @@ audio, trim defaults, etc.) to a JSON file in the user's AppData folder.
 import json
 import os
 import shutil
+import tempfile
 from pathlib import Path
 
 APP_NAME = "LoopClip"
@@ -93,11 +94,32 @@ def load_settings() -> dict:
 
 
 def save_settings(settings: dict) -> None:
-    """Persist settings to disk."""
+    """Persist settings to disk atomically.
+
+    Writes to a temporary file in the same directory first, flushes it to
+    disk, then swaps it into place with os.replace (atomic on both Windows
+    and POSIX). This means an interruption mid-write (crash, power loss,
+    forced close) can never leave settings.json half-written/corrupted -
+    the old file stays intact until the new one is fully ready, and
+    os.replace() itself either fully succeeds or fully fails.
+    """
     path = _settings_path()
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(settings, f, indent=2)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(path.parent), prefix=".settings_", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, path)
+        except OSError:
+            try:
+                os.remove(tmp_name)
+            except OSError:
+                pass
+            raise
     except OSError:
         # Non-fatal: app should continue to work even if it can't persist
         pass
