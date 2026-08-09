@@ -32,6 +32,7 @@ It was originally built for **Projectivy Launcher** on a 4K TV, but works for an
 
 - [Features](#features)
 - [Requirements](#requirements)
+- [Download](#download)
 - [Getting Started](#getting-started)
 - [How to Use](#how-to-use)
 - [Auto-Detect Seamless Loop](#auto-detect-seamless-loop)
@@ -40,6 +41,7 @@ It was originally built for **Projectivy Launcher** on a 4K TV, but works for an
 - [Project Structure](#project-structure)
 - [Quality Handling Notes](#quality-handling-notes)
 - [About the Rename](#about-the-rename)
+- [Reporting Issues](#reporting-issues)
 - [Support This Project](#support-this-project)
 - [License](#license)
 
@@ -60,7 +62,7 @@ It was originally built for **Projectivy Launcher** on a 4K TV, but works for an
 **Looping & trimming**
 - Trim by entering Hours / Minutes / Seconds in simple digit boxes — no free-text time formats to get wrong
 - **Auto-detect seamless loop** — analyzes a video (or a window within it) and automatically finds the best-matching loop point for you. See [Auto-Detect Seamless Loop](#auto-detect-seamless-loop) below.
-- Optional **seamless loop crossfade** that blends a clip's end into its start, with adjustable length (1 / 2 / 3 sec)
+- Optional **seamless loop crossfade** that blends a clip's end into its start, with adjustable length (1 / 2 / 3 sec) — if the crossfade can't be built for some reason, LoopClip falls back to saving a plain trimmed clip instead of losing the whole item, with a note shown next to the finished file
 
 **Command line**
 - Full CLI (`cli.py`) for scripting/automation — download-or-local-file input, auto-detect loop, crossfade, and encode, all from one command with no GUI required. See [Command-Line Interface](#command-line-interface).
@@ -68,10 +70,21 @@ It was originally built for **Projectivy Launcher** on a 4K TV, but works for an
 **Quality of life**
 - Adjustable output audio bitrate, or mute entirely
 - Settings remembered between runs, and auto-migrated if upgrading from Aquarium Downloader
-- Friendly error messages for missing tools, bad URLs, network failures, and low disk space
+- Friendly, specific error messages for missing tools, bad URLs, network failures, low disk space, and failures at any stage of processing (not just downloading)
+- **Retry** on a failed item reuses the already-downloaded source file if the download itself succeeded and a later step failed, instead of downloading the video again
 - Dark, Windows 11–style UI (CustomTkinter)
 
 > **Not yet included:** drag-and-drop, a video library manager, playlist/channel downloads, GPU-accelerated frame analysis for auto-detect (currently CPU-only — see [Requirements](#requirements)).
+
+## Download
+
+The easiest way to get LoopClip is to grab the latest pre-built `.exe` — no Python required:
+
+**[Download the latest release](https://github.com/quinnuk/LoopClip/releases)**
+
+You'll still need [FFmpeg](https://ffmpeg.org/download.html) installed and on your PATH (see [Requirements](#requirements) below) — the app will tell you clearly if it's missing.
+
+If you'd rather run from source or build the exe yourself, see [Getting Started](#getting-started) below.
 
 ## Requirements
 
@@ -229,6 +242,14 @@ LoopClip/
 ## About the Rename
 
 This project started life as **Aquarium Downloader**, aimed narrowly at aquarium screensaver footage. Since it works equally well for any looping background video, it's now **LoopClip**. If you're upgrading from an older Aquarium Downloader install, your existing settings carry over automatically on first run — nothing to do manually.
+
+## Reporting Issues
+
+Found a bug or have a suggestion? Please open an issue rather than a Reddit comment, so it doesn't get lost:
+
+**[Open an issue](https://github.com/quinnuk/LoopClip/issues/new/choose)**
+
+The bug report form will ask for your LoopClip version, the video URL, your settings, and what happened — filling that in makes it much faster to track down what's actually going wrong.
 
 ## Support This Project
 
