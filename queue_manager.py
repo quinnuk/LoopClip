@@ -20,6 +20,19 @@ import loop_detector
 import processor
 
 
+class _CachedDownloadResult:
+    """
+    Minimal stand-in for downloader.download_video()'s return value, used
+    when retry_item() reuses a previously-downloaded file instead of
+    downloading again. Only .filepath and .title are ever read downstream,
+    so this is all that's needed.
+    """
+
+    def __init__(self, filepath: str, title: str):
+        self.filepath = filepath
+        self.title = title
+
+
 class QueueState:
     QUEUED = "Queued"
     DOWNLOADING = "Downloading"
@@ -65,6 +78,11 @@ class QueueItem:
     output_name: str = ""
     title: str = ""
     detected_loop: "Optional[loop_detector.LoopCandidate]" = None
+    # Set when a download succeeded but a later stage (analysis/trim/loop)
+    # failed - lets Retry reuse the already-downloaded file instead of
+    # downloading the same video again.
+    cached_source_path: str = ""
+    cached_source_title: str = ""
 
 
 # Fallback message used only when nothing else below matched - one per
@@ -182,6 +200,10 @@ class QueueManager:
         self._lock = threading.RLock()
         self._on_update = on_update
         self._temp_root = temp_root
+        # Kept separate from each item's own temp_dir (which is wiped on
+        # every finish/error/cancel) so a cached source survives long
+        # enough for Retry to reuse it.
+        self._cache_root = temp_root / "_download_cache"
         self._worker_thread: Optional[threading.Thread] = None
         self._running = False
         self._cancel_requested = False
@@ -206,6 +228,13 @@ class QueueManager:
             if self._running:
                 return False
             self.items.clear()
+        # Drop any cached downloads left behind by errored items that
+        # never got retried, rather than letting them accumulate on disk.
+        try:
+            if self._cache_root.exists():
+                shutil.rmtree(self._cache_root, ignore_errors=True)
+        except OSError:
+            pass
         self._notify()
         return True
 
@@ -333,6 +362,7 @@ class QueueManager:
             self._notify()
 
         try:
+            result = None
             section_range = None
             search_offset = 0.0
             # Only download the window that's actually needed, instead of
@@ -360,16 +390,32 @@ class QueueManager:
                 section_range = (section_start, section_end)
                 search_offset = section_start
 
-            result = downloader.download_video(
-                url=item.url,
-                temp_dir=str(temp_dir),
-                quality=item.quality,
-                no_audio=item.no_audio,
-                section_range_seconds=section_range,
-                progress_callback=on_progress,
-                process_holder=self._current_process,
-                cancel_check=self._is_cancelled,
-            )
+            if item.cached_source_path and Path(item.cached_source_path).exists():
+                # A previous attempt on this item downloaded successfully
+                # but failed at a later stage (analysis/trim/loop) - reuse
+                # that file instead of downloading the same video again.
+                # Note: if "Limit search window" was changed since the
+                # cached copy was made, the cached file still reflects the
+                # *old* window - remove and re-add the item to force a
+                # fresh download if that's what's needed.
+                item.state = QueueState.DOWNLOADING
+                item.operation = "Using previously downloaded file..."
+                item.percent = 100.0
+                self._notify()
+                result = _CachedDownloadResult(
+                    filepath=item.cached_source_path, title=item.cached_source_title,
+                )
+            else:
+                result = downloader.download_video(
+                    url=item.url,
+                    temp_dir=str(temp_dir),
+                    quality=item.quality,
+                    no_audio=item.no_audio,
+                    section_range_seconds=section_range,
+                    progress_callback=on_progress,
+                    process_holder=self._current_process,
+                    cancel_check=self._is_cancelled,
+                )
             item.title = result.title
 
             local_start_seconds = 0.0
@@ -516,18 +562,66 @@ class QueueManager:
             item.operation = "Finished" if not item.warning_message else "Finished (see note)"
             item.percent = 100.0
             item.output_name = Path(out_path).name
+            # Job's done - drop any cached source now, rather than leaving
+            # it on disk indefinitely.
+            self._clear_cached_source(item)
 
         except (downloader.CancelledError, processor.CancelledError):
             self._mark_cancelled(item, temp_dir, out_path)
             return
         except Exception as exc:  # noqa: BLE001 - never let a bad video kill the queue
             failed_stage = item.state  # capture before it's overwritten below
+            # If the download itself succeeded but a later stage failed,
+            # keep the downloaded file around (outside temp_dir, which is
+            # about to be wiped below) so Retry can reuse it instead of
+            # downloading the same video again.
+            if failed_stage != QueueState.DOWNLOADING:
+                self._cache_source_file(item, result)
             item.state = QueueState.ERROR
             item.error_message = _friendly_error(str(exc), stage=failed_stage)
             item.operation = "Error"
         finally:
             self._cleanup_temp(temp_dir)
             self._notify()
+
+    def _cache_source_file(self, item: QueueItem, result) -> None:
+        """
+        Best-effort: moves the already-downloaded source file into a
+        persistent per-item cache directory (outside temp_dir, which gets
+        wiped after every attempt) so a subsequent Retry can reuse it
+        instead of downloading the same video again. Silently does
+        nothing if there's no result, the file's gone missing, or the
+        move fails for any reason - this is a convenience, not something
+        that should ever turn a real error into a different one.
+        """
+        if result is None:
+            return
+        try:
+            src = Path(result.filepath)
+            if not src.exists():
+                return
+            cache_dir = self._cache_root / item.id
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            dest = cache_dir / src.name
+            if src.resolve() != dest.resolve():
+                if dest.exists():
+                    dest.unlink()
+                shutil.move(str(src), str(dest))
+            item.cached_source_path = str(dest)
+            item.cached_source_title = result.title
+        except OSError:
+            pass
+
+    def _clear_cached_source(self, item: QueueItem) -> None:
+        if item.cached_source_path:
+            try:
+                cache_dir = Path(item.cached_source_path).parent
+                if cache_dir.exists() and cache_dir.parent == self._cache_root:
+                    shutil.rmtree(cache_dir, ignore_errors=True)
+            except OSError:
+                pass
+        item.cached_source_path = ""
+        item.cached_source_title = ""
 
     def _mark_cancelled(self, item: QueueItem, temp_dir: Path, out_path: Optional[str]):
         item.state = QueueState.CANCELLED
