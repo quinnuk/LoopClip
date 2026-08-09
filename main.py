@@ -1158,7 +1158,17 @@ class LoopClipApp(ctk.CTk):
                 widgets["detail"].pack_forget()
                 widgets["message_label"].pack(fill="x", padx=10, pady=(0, 8))
                 widgets["shown_extra"] = "message"
-            widgets["message_label"].configure(text=item.output_name, text_color="#9AA0A6")
+            if item.warning_message:
+                # Finished, but something degraded along the way (e.g. the
+                # seamless-loop crossfade couldn't be built, so a plain
+                # trimmed clip was saved instead) - show that instead of
+                # just the filename so it isn't mistaken for a clean run.
+                widgets["message_label"].configure(
+                    text=f"{item.output_name}  -  {item.warning_message}",
+                    text_color="#E3B341",
+                )
+            else:
+                widgets["message_label"].configure(text=item.output_name, text_color="#9AA0A6")
         else:
             if widgets["shown_extra"] is not None:
                 widgets["detail"].pack_forget()

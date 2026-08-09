@@ -266,7 +266,17 @@ def find_loop_candidates(
 
     n = len(frames)
     total_span = frames[-1].time - frames[0].time
-    min_len = min_loop_seconds if min_loop_seconds is not None else min(DEFAULT_MIN_LOOP_SECONDS, total_span)
+    if min_loop_seconds is not None:
+        min_len = min_loop_seconds
+    else:
+        # Auto default: DEFAULT_MIN_LOOP_SECONDS (120s) is fine for longer
+        # clips, but must never be allowed to collapse the search window
+        # to zero. For any clip shorter than ~4 minutes, capping at half
+        # the total span (instead of the raw clip length) guarantees at
+        # least that much room remains between min_len and max_len, so a
+        # short clip - e.g. a 90s video - can still find a loop instead of
+        # always hitting the "leaves no room to search" error below.
+        min_len = min(DEFAULT_MIN_LOOP_SECONDS, total_span * 0.5)
     max_len = max_loop_seconds if max_loop_seconds else total_span
 
     if min_len >= max_len:

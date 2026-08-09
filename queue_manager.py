@@ -61,12 +61,30 @@ class QueueItem:
     speed: str = "-"
     eta: str = "-"
     error_message: str = ""
+    warning_message: str = ""
     output_name: str = ""
     title: str = ""
     detected_loop: "Optional[loop_detector.LoopCandidate]" = None
 
 
-def _friendly_error(message: str) -> str:
+# Fallback message used only when nothing else below matched - one per
+# pipeline stage, so a failure that happens *after* the download has
+# already succeeded (analysis, trimming, loop creation) never gets
+# reported to the user as a download problem. Keyed by the QueueState the
+# item was in when the exception was raised.
+_GENERIC_STAGE_ERRORS = {
+    QueueState.DOWNLOADING: "The video could not be downloaded. Check the URL or try again.",
+    QueueState.ANALYZING: (
+        "Something went wrong while analyzing the video for a seamless loop. "
+        "Try a different method, lower the similarity %, or widen the search window."
+    ),
+    QueueState.TRIMMING: "Something went wrong while processing the video. Check the settings and try again.",
+    QueueState.LOOPING: "Something went wrong while creating the seamless loop. Try a shorter crossfade length.",
+}
+_DEFAULT_GENERIC_ERROR = "Something went wrong while processing this item. Please try again."
+
+
+def _friendly_error(message: str, stage: str = QueueState.DOWNLOADING) -> str:
     low = message.lower()
     if "ffmpeg executable was not found" in low:
         return (
@@ -77,7 +95,7 @@ def _friendly_error(message: str) -> str:
         # This is FFmpeg's own diagnostic output (not a raw Python
         # traceback), so it's safe and useful to show as-is.
         return message
-    if "no seamless loop found" in low or "not enough frames" in low or "could not open video for analysis" in low:
+    if "no seamless loop found" in low or "not enough frames" in low or "could not open video for analysis" in low or "leaves no room to search" in low:
         # loop_detector's own messages are already user-friendly guidance
         # (lower similarity / widen search window / try another method).
         return message
@@ -93,7 +111,9 @@ def _friendly_error(message: str) -> str:
         return "The video could not be downloaded. Check your internet connection and try again."
     if "no space left" in low or "disk full" in low or "not enough space" in low:
         return "Ran out of disk space partway through. Free up some space and try again."
-    return "The video could not be downloaded. Check the URL or try again."
+    # Nothing specific matched - fall back to a message for whichever
+    # stage the item was actually in, instead of always assuming download.
+    return _GENERIC_STAGE_ERRORS.get(stage, _DEFAULT_GENERIC_ERROR)
 
 
 # Minimum free space to require even when the item's size can't be
@@ -461,6 +481,10 @@ class QueueManager:
                 # rather than leaving a half-written file in the output
                 # folder.
                 looped_path = str(temp_dir / "seamless_loop.mp4")
+
+                def on_loop_warning(message: str, _item=item):
+                    _item.warning_message = message
+
                 processor.apply_seamless_loop(
                     input_path=out_path,
                     output_path=looped_path,
@@ -469,6 +493,7 @@ class QueueManager:
                     no_audio=item.no_audio,
                     process_holder=self._current_process,
                     cancel_check=self._is_cancelled,
+                    on_warning=on_loop_warning,
                 )
                 os.remove(out_path)
                 shutil.move(looped_path, out_path)
@@ -488,7 +513,7 @@ class QueueManager:
                     pass
 
             item.state = QueueState.FINISHED
-            item.operation = "Finished"
+            item.operation = "Finished" if not item.warning_message else "Finished (see note)"
             item.percent = 100.0
             item.output_name = Path(out_path).name
 
@@ -496,8 +521,9 @@ class QueueManager:
             self._mark_cancelled(item, temp_dir, out_path)
             return
         except Exception as exc:  # noqa: BLE001 - never let a bad video kill the queue
+            failed_stage = item.state  # capture before it's overwritten below
             item.state = QueueState.ERROR
-            item.error_message = _friendly_error(str(exc))
+            item.error_message = _friendly_error(str(exc), stage=failed_stage)
             item.operation = "Error"
         finally:
             self._cleanup_temp(temp_dir)
