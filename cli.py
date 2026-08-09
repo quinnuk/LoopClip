@@ -29,6 +29,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 import downloader
 import loop_detector
@@ -94,8 +95,92 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def validate_args(args) -> Optional[str]:
+    """
+    Validates parsed CLI arguments beyond what argparse's `type=`/`choices=`
+    already enforce, returning a human-readable error message (or None if
+    everything checks out). Kept as a separate, pure function - takes an
+    argparse Namespace, returns str|None - so it can be unit-tested without
+    needing to invoke main() or touch the filesystem/network.
+    """
+    if not (0 <= args.similarity <= 100):
+        return f"--similarity must be between 0 and 100 (got {args.similarity})."
+
+    if args.downsample < 1:
+        return f"--downsample must be a positive integer (got {args.downsample})."
+
+    if not processor.validate_hms(args.start):
+        return f"--start must be in HH:MM:SS format (got '{args.start}')."
+
+    start_seconds = processor.hms_to_seconds(args.start)
+    stop_seconds = None
+    if args.stop is not None:
+        if not processor.validate_hms(args.stop):
+            return f"--stop must be in HH:MM:SS format (got '{args.stop}')."
+        stop_seconds = processor.hms_to_seconds(args.stop)
+        if stop_seconds <= start_seconds:
+            return (
+                f"--stop ({args.stop}) must be later than --start ({args.start})."
+            )
+
+    if args.min_length is not None and args.min_length <= 0:
+        return f"--min-length must be a positive number of seconds (got {args.min_length})."
+
+    if args.max_length is not None and args.max_length <= 0:
+        return f"--max-length must be a positive number of seconds (got {args.max_length})."
+
+    if (
+        args.min_length is not None
+        and args.max_length is not None
+        and args.min_length >= args.max_length
+    ):
+        return (
+            f"--min-length ({args.min_length}) must be smaller than "
+            f"--max-length ({args.max_length})."
+        )
+
+    if args.crossfade is not None:
+        if args.crossfade <= 0:
+            return f"--crossfade must be a positive number of seconds (got {args.crossfade})."
+        # Loop duration isn't known until after detection runs (or, with
+        # --no-auto-loop, until the source's own length is probed), so a
+        # tight upper-bound check happens later in apply_seamless_loop
+        # itself, which already falls back to a plain trimmed copy with a
+        # clear warning if the crossfade turns out to be too long for the
+        # actual clip.
+
+    try:
+        video_bitrate_val = int(args.video_bitrate)
+    except (TypeError, ValueError):
+        return f"--video-bitrate must be a whole number of Mbps (got '{args.video_bitrate}')."
+    if video_bitrate_val <= 0:
+        return f"--video-bitrate must be a positive number of Mbps (got {args.video_bitrate})."
+
+    if args.audio_bitrate != "original":
+        try:
+            audio_bitrate_val = int(args.audio_bitrate)
+        except (TypeError, ValueError):
+            return (
+                "--audio-bitrate must be 'original' or a whole number of kbps "
+                f"(got '{args.audio_bitrate}')."
+            )
+        if audio_bitrate_val <= 0:
+            return f"--audio-bitrate must be a positive number of kbps (got {args.audio_bitrate})."
+
+    output_parent = Path(args.output).parent
+    if output_parent != Path("") and output_parent.exists() and not output_parent.is_dir():
+        return f"--output's parent path exists but is not a directory: {output_parent}"
+
+    return None
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+
+    error = validate_args(args)
+    if error is not None:
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
 
     print("LoopClip CLI")
     print("=" * 40)
