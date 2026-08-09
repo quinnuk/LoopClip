@@ -1,0 +1,87 @@
+name: Bug Report
+description: Something isn't working right
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. Filling in as much of this
+        as you can makes it much faster to track down the actual cause,
+        especially the video URL and your settings.
+
+  - type: input
+    id: loopclip-version
+    attributes:
+      label: LoopClip version
+      description: Check Help or the About section, or the release you downloaded from.
+      placeholder: e.g. v2.0.1
+    validations:
+      required: true
+
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version
+      placeholder: e.g. Windows 11 23H2
+    validations:
+      required: true
+
+  - type: input
+    id: video-url
+    attributes:
+      label: YouTube video URL
+      description: The exact video you were trying to process when this happened.
+      placeholder: https://youtu.be/...
+    validations:
+      required: true
+
+  - type: textarea
+    id: settings
+    attributes:
+      label: Settings used
+      description: Copy what you had set for each of these (a screenshot of the app window works too - just attach it below).
+      placeholder: |
+        Download Quality:
+        Video Bitrate:
+        No sound (mute video): yes/no
+        Auto-detect seamless loop: yes/no
+        Method:
+        Similarity %:
+        Limit search window: yes/no (from/to if yes)
+        Seamless loop crossfade: yes/no (length if yes)
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened?
+      description: Include the exact error message shown in the queue, if there was one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: Drag and drop image files here - especially the queue item showing the error, and your settings panel.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked the existing issues and this hasn't already been reported
+          required: true
+        - label: I'm running the latest release
+          required: false
