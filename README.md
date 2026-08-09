@@ -183,7 +183,15 @@ Run `python cli.py --help` at any time to see this listed directly from the tool
 
 ## Building a Standalone .exe
 
-Once everything runs correctly from source:
+Once everything runs correctly from source, the easiest way is to just run:
+
+```bash
+build_exe.bat
+```
+
+This installs/updates the dependencies (including PyInstaller if it's missing), builds the exe, and tells you clearly whether it succeeded.
+
+If you'd rather run the build command yourself:
 
 ```bash
 python -m PyInstaller --noconfirm --onefile --windowed --icon icon.ico --name LoopClip main.py
@@ -207,6 +215,7 @@ LoopClip/
 ├── tool_check.py              # Detects yt-dlp / FFmpeg availability
 ├── LoopClip.vbs               # Silent launcher (no console window)
 ├── Run LoopClip.bat           # Alternative silent launcher
+├── build_exe.bat              # One-click rebuild of LoopClip.exe
 └── requirements.txt
 ```
 
