@@ -1,0 +1,23 @@
+name: Bug report
+about: Report a problem with LoopClip
+title: "[BUG] "
+labels: bug
+LoopClip version
+(e.g. v2.0.0 — check Help > About or the release you downloaded)
+Video URL
+The exact YouTube URL you tried to queue.
+What happened
+Describe what went wrong, step by step if possible.
+At what stage did it fail?
+[ ] Download
+[ ] Frame extraction / loop detection
+[ ] Trimming/encoding
+[ ] Other (describe below)
+Log output
+Paste the relevant log/error text here. (Check LoopClip's log file or folder if it has one — include the full error, not just a screenshot of the queue.)
+Screenshots
+If applicable, add screenshots to help explain the problem.
+System info
+OS: (e.g. Windows 11)
+FFmpeg installed and on PATH? (yes/no)
+GPU: (e.g. NVIDIA RTX 3060, or "none / CPU only")
