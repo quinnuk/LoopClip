@@ -12,6 +12,12 @@ echo.
 echo Building LoopClip.exe...
 python -m PyInstaller --noconfirm --onefile --windowed --icon icon.ico --name LoopClip main.py
 
+REM PyInstaller --onefile only writes the exe into dist\ - copy it up to
+REM the project root so it's where the README/users expect it.
+if exist "dist\LoopClip.exe" (
+    copy /y "dist\LoopClip.exe" "LoopClip.exe" >nul
+)
+
 if exist "LoopClip.exe" (
     echo.
     echo Build succeeded - LoopClip.exe is ready in this folder.
