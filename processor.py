@@ -239,6 +239,16 @@ def get_duration_seconds(path: str) -> float:
         ) from exc
 
 
+def _warn(on_warning: Optional[Callable[[str], None]], message: str) -> None:
+    """Best-effort call to an optional warning callback - never lets a
+    problem in the callback itself interrupt processing."""
+    if on_warning is not None:
+        try:
+            on_warning(message)
+        except Exception:
+            pass
+
+
 def apply_seamless_loop(
     input_path: str,
     output_path: str,
@@ -247,6 +257,7 @@ def apply_seamless_loop(
     no_audio: bool,
     process_holder: Optional[dict] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    on_warning: Optional[Callable[[str], None]] = None,
 ) -> None:
     """
     Makes a clip loop seamlessly by cross-fading its last `crossfade_seconds`
@@ -254,6 +265,16 @@ def apply_seamless_loop(
     visible jump-cut where it repeats. The output is `crossfade_seconds`
     shorter than the input, since the overlapping ends are blended into
     one shared segment rather than simply appended one after another.
+
+    If the crossfade can't be built - the clip is too short for the
+    requested crossfade length, or any of the FFmpeg steps below fail -
+    this falls back to saving a plain trimmed copy with no crossfade
+    instead of raising and aborting the whole queue item. `on_warning`,
+    if given, is called with a human-readable message describing the
+    fallback so the caller can surface it (e.g. a toast/log line) rather
+    than losing the source file for nothing. A user-triggered cancel
+    (CancelledError) is never turned into a fallback - it always
+    propagates so Cancel keeps working as expected.
 
     Built as four small, independent steps rather than one big filter
     graph spanning the whole clip:
@@ -288,10 +309,15 @@ def apply_seamless_loop(
     duration = get_duration_seconds(input_path)
     x = crossfade_seconds
     if x * 2 >= duration:
-        raise RuntimeError(
-            f"The crossfade duration ({x:.0f}s) is too long for this "
-            f"{duration:.0f}s clip - it must be less than half the clip's length."
+        _warn(
+            on_warning,
+            f"Crossfade duration ({x:.0f}s) is too long for this {duration:.0f}s "
+            "clip, so it was saved without a seamless loop instead.",
         )
+        _plain_copy_fallback(
+            input_path, output_path, video_bitrate, no_audio, process_holder, cancel_check,
+        )
+        return
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -305,36 +331,48 @@ def apply_seamless_loop(
     concat_list_path = str(work_dir / f"_loopconcat_{uid}.txt")
 
     try:
-        _quick_trim(
-            input_path, head_path, 0, x, no_audio, process_holder, cancel_check,
-            force_reencode=True,
-        )
-        _quick_trim(
-            input_path, tail_path, end_start, duration, no_audio, process_holder, cancel_check,
-            force_reencode=True,
-        )
-        _crossfade_two_clips(
-            tail_path, head_path, transition_path, x, video_bitrate, no_audio,
-            process_holder, cancel_check,
-        )
-        _encode_segment(
-            input_path, middle_path, x, end_start, video_bitrate, no_audio,
-            process_holder, cancel_check, error_context="the main body of the clip",
-        )
+        try:
+            _quick_trim(
+                input_path, head_path, 0, x, no_audio, process_holder, cancel_check,
+                force_reencode=True,
+            )
+            _quick_trim(
+                input_path, tail_path, end_start, duration, no_audio, process_holder, cancel_check,
+                force_reencode=True,
+            )
+            _crossfade_two_clips(
+                tail_path, head_path, transition_path, x, video_bitrate, no_audio,
+                process_holder, cancel_check,
+            )
+            _encode_segment(
+                input_path, middle_path, x, end_start, video_bitrate, no_audio,
+                process_holder, cancel_check, error_context="the main body of the clip",
+            )
 
-        with open(concat_list_path, "w", encoding="utf-8") as f:
-            f.write(f"file '{Path(middle_path).as_posix()}'\n")
-            f.write(f"file '{Path(transition_path).as_posix()}'\n")
+            with open(concat_list_path, "w", encoding="utf-8") as f:
+                f.write(f"file '{Path(middle_path).as_posix()}'\n")
+                f.write(f"file '{Path(transition_path).as_posix()}'\n")
 
-        concat_cmd = [
-            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-            "-i", concat_list_path, "-c", "copy", output_path,
-        ]
-        returncode, stderr = _run_ffmpeg(concat_cmd, process_holder, cancel_check)
-        if returncode != 0 or not Path(output_path).exists():
-            tail_err = "\n".join((stderr or "").strip().splitlines()[-6:])
-            raise RuntimeError(
-                f"FFmpeg reported an error while joining the seamless loop segments:\n{tail_err}"
+            concat_cmd = [
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                "-i", concat_list_path, "-c", "copy", output_path,
+            ]
+            returncode, stderr = _run_ffmpeg(concat_cmd, process_holder, cancel_check)
+            if returncode != 0 or not Path(output_path).exists():
+                tail_err = "\n".join((stderr or "").strip().splitlines()[-6:])
+                raise RuntimeError(
+                    f"FFmpeg reported an error while joining the seamless loop segments:\n{tail_err}"
+                )
+        except CancelledError:
+            raise
+        except Exception as exc:
+            _warn(
+                on_warning,
+                f"Could not build the seamless loop crossfade ({exc}); "
+                "saved as a plain trimmed clip instead.",
+            )
+            _plain_copy_fallback(
+                input_path, output_path, video_bitrate, no_audio, process_holder, cancel_check,
             )
     finally:
         for p in (head_path, tail_path, middle_path, transition_path, concat_list_path):
@@ -343,6 +381,71 @@ def apply_seamless_loop(
                     os.remove(p)
             except OSError:
                 pass
+
+
+def _plain_copy_fallback(
+    input_path: str,
+    output_path: str,
+    video_bitrate: str,
+    no_audio: bool,
+    process_holder: Optional[dict],
+    cancel_check: Optional[Callable[[], bool]],
+) -> None:
+    """Saves the full, un-blended clip as-is - used when the seamless loop
+    crossfade can't be built. This is what apply_seamless_loop falls back
+    to instead of raising, so a queue item still ends up with a usable
+    output file (and 'Delete original large file' can safely remove the
+    source afterward) rather than the whole item aborting.
+
+    Tries a fast stream copy first, same as process_video's main path,
+    then falls back to an NVENC/CPU re-encode at the standard H.265/4K
+    spec only if a straight copy isn't possible for this source.
+    """
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    audio_args = [] if no_audio else ["-c:a", "copy"]
+
+    copy_cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-c:v", "copy", *audio_args,
+        "-avoid_negative_ts", "make_zero", output_path,
+    ]
+    returncode, _ = _run_ffmpeg(copy_cmd, process_holder, cancel_check)
+    if returncode == 0 and Path(output_path).exists():
+        return
+
+    vbitrate = f"{video_bitrate}M"
+    reencode_audio_args = [] if no_audio else ["-c:a", "aac", "-b:a", "192k"]
+
+    nvenc_cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-vf", "scale=3840:2160,format=nv12",
+        "-c:v", "hevc_nvenc", "-preset", "p4", "-rc", "vbr",
+        "-b:v", vbitrate, "-maxrate", vbitrate, "-bufsize", f"{int(video_bitrate) * 2}M",
+        "-r", "30", *reencode_audio_args, output_path,
+    ]
+    returncode, nvenc_stderr = _run_ffmpeg(nvenc_cmd, process_holder, cancel_check)
+    if returncode == 0 and Path(output_path).exists():
+        return
+
+    nvenc_tail = "\n".join((nvenc_stderr or "").strip().splitlines()[-4:])
+
+    cpu_cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-vf", "scale=3840:2160",
+        "-c:v", "libx265", "-preset", "veryfast", "-threads", "4",
+        "-x265-params", "pools=4:frame-threads=2",
+        "-b:v", vbitrate, "-maxrate", vbitrate, "-bufsize", f"{int(video_bitrate) * 2}M",
+        "-r", "30", *reencode_audio_args, output_path,
+    ]
+    returncode, cpu_stderr = _run_ffmpeg(cpu_cmd, process_holder, cancel_check)
+    if returncode != 0:
+        cpu_tail = "\n".join((cpu_stderr or "").strip().splitlines()[-6:])
+        raise RuntimeError(
+            "FFmpeg reported an error while saving the clip without a seamless "
+            "loop (the crossfade attempt also failed earlier).\n\n"
+            f"GPU (NVENC) attempt failed with:\n{nvenc_tail}\n\n"
+            f"CPU fallback then also failed with:\n{cpu_tail}"
+        )
 
 
 def _quick_trim(
