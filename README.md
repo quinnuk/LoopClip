@@ -41,6 +41,7 @@ It was originally built for **Projectivy Launcher** on a 4K TV, but works for an
 - [Project Structure](#project-structure)
 - [Quality Handling Notes](#quality-handling-notes)
 - [About the Rename](#about-the-rename)
+- [Understanding Error and Warning Messages](#understanding-error-and-warning-messages)
 - [Reporting Issues](#reporting-issues)
 - [Support This Project](#support-this-project)
 - [License](#license)
@@ -242,6 +243,25 @@ LoopClip/
 ## About the Rename
 
 This project started life as **Aquarium Downloader**, aimed narrowly at aquarium screensaver footage. Since it works equally well for any looping background video, it's now **LoopClip**. If you're upgrading from an older Aquarium Downloader install, your existing settings carry over automatically on first run — nothing to do manually.
+
+## Understanding Error and Warning Messages
+
+Each queue item shows its status as it processes: **Downloading → Analyzing → Trimming → Creating Loop → Finished**. If something goes wrong, the item turns red and shows a specific message instead of a generic failure — worth reading in full, since it usually tells you exactly what to change.
+
+**Amber "Finished (see note)"** — the item actually succeeded, but something had to be worked around along the way. Most commonly: the seamless loop crossfade couldn't be built, so a plain trimmed clip was saved instead. You still get a usable file; it just won't have a blended loop point.
+
+**Common red error messages, and what they mean:**
+
+| Message mentions... | What it means | What to try |
+|---|---|---|
+| "FFmpeg was not found" | FFmpeg isn't installed or isn't on your PATH | Install FFmpeg and confirm it's on PATH (see [Requirements](#requirements)) |
+| "leaves no room to search" | Your minimum loop length is too close to (or longer than) the video/search window itself | Widen the search window, or lower the minimum loop length |
+| "No seamless loop found at X% similarity... closest match was Y%" | Auto-detect ran fine, but nothing hit your similarity threshold | Lower Similarity % to a little below the reported Y%, try `histogram` instead of `combined` for moving footage, or widen the search window |
+| "This video is private" / "unavailable" / "age-restricted" | The source video itself can't be downloaded, regardless of settings | Try a different video, or sign in if it's an age restriction (not currently supported) |
+| "Not enough free disk space" | Your output or temp drive is close to full | Free up space and retry — Retry will reuse the already-downloaded file rather than downloading again |
+| "Something went wrong while creating the seamless loop" | Both the crossfade and the plain-trim fallback failed — rare, usually points to a genuinely corrupt download | Try Retry once (it reuses the download), and if it happens again, re-add the item to force a fresh download |
+
+If a message doesn't match anything above, or the suggested fix doesn't help, that's exactly what the [issue template](#reporting-issues) is for — it'll ask for the message, the video URL, and your settings, which is normally enough to track down what's actually happening.
 
 ## Reporting Issues
 
