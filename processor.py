@@ -110,7 +110,13 @@ def build_output_filename(title: str, duration_seconds: float) -> str:
 
 def _audio_args(audio_bitrate: str, no_audio: bool) -> list:
     if no_audio:
-        return []
+        # "-an" is required to actually drop the audio stream. Simply
+        # omitting a "-c:a ..." flag does NOT do this - ffmpeg still maps
+        # and encodes the source's audio track with its own default codec
+        # choice when no explicit codec or stream selection is given, so
+        # an empty args list here previously left --no-audio silently
+        # doing nothing.
+        return ["-an"]
     if audio_bitrate == "original":
         return ["-c:a", "copy"]
     return ["-c:a", "aac", "-b:a", f"{audio_bitrate}k"]
@@ -458,7 +464,9 @@ def _plain_copy_fallback(
     spec only if a straight copy isn't possible for this source.
     """
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    audio_args = [] if no_audio else ["-c:a", "copy"]
+    # "-an" (not just omitting -c:a) is required to actually drop audio -
+    # see _audio_args' docstring note for why.
+    audio_args = ["-an"] if no_audio else ["-c:a", "copy"]
 
     copy_cmd = [
         "ffmpeg", "-y", "-i", input_path,
@@ -470,7 +478,7 @@ def _plain_copy_fallback(
         return
 
     vbitrate = f"{video_bitrate}M"
-    reencode_audio_args = [] if no_audio else ["-c:a", "aac", "-b:a", "192k"]
+    reencode_audio_args = ["-an"] if no_audio else ["-c:a", "aac", "-b:a", "192k"]
 
     nvenc_cmd = [
         "ffmpeg", "-y", "-i", input_path,
@@ -529,7 +537,9 @@ def _quick_trim(
     into xfade/concat later.
     """
     dur = end - start
-    audio_args = [] if no_audio else ["-c:a", "copy"]
+    # "-an" (not just omitting -c:a) is required to actually drop audio -
+    # see _audio_args' docstring note for why.
+    audio_args = ["-an"] if no_audio else ["-c:a", "copy"]
 
     if not force_reencode:
         copy_cmd = [
@@ -544,7 +554,7 @@ def _quick_trim(
         "ffmpeg", "-y", "-ss", str(start), "-i", input_path, "-t", str(dur),
         "-vf", f"fps={fps}",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        *([] if no_audio else ["-c:a", "aac", "-b:a", "192k", "-af", "aresample=async=1"]),
+        *(["-an"] if no_audio else ["-c:a", "aac", "-b:a", "192k", "-af", "aresample=async=1"]),
         output_path,
     ]
     returncode, stderr = _run_ffmpeg(reencode_cmd, process_holder, cancel_check)
@@ -643,7 +653,9 @@ def _encode_segment(
     of length."""
     dur = end - start
     vbitrate = f"{video_bitrate}M"
-    audio_args = [] if no_audio else ["-c:a", "aac", "-b:a", "192k"]
+    # "-an" (not just omitting -c:a) is required to actually drop audio -
+    # see _audio_args' docstring note for why.
+    audio_args = ["-an"] if no_audio else ["-c:a", "aac", "-b:a", "192k"]
 
     nvenc_cmd = [
         "ffmpeg", "-y", "-ss", str(start), "-i", input_path, "-t", str(dur),
