@@ -223,6 +223,7 @@ def process_video(
     returncode, cpu_stderr = _run_ffmpeg(hevc_cpu_cmd, process_holder, cancel_check)
     if returncode != 0:
         cpu_tail = "\n".join((cpu_stderr or "").strip().splitlines()[-6:])
+        _remove_partial_output(output_path)
         raise RuntimeError(
             "FFmpeg reported an error while processing this video.\n\n"
             f"GPU (NVENC) attempt failed with:\n{nvenc_tail}\n\n"
@@ -422,6 +423,7 @@ def apply_seamless_loop(
             returncode, stderr = _run_ffmpeg(concat_cmd, process_holder, cancel_check)
             if returncode != 0 or not Path(output_path).exists():
                 tail_err = "\n".join((stderr or "").strip().splitlines()[-6:])
+                _remove_partial_output(output_path)
                 raise RuntimeError(
                     f"FFmpeg reported an error while joining the seamless loop segments:\n{tail_err}"
                 )
@@ -504,6 +506,7 @@ def _plain_copy_fallback(
     returncode, cpu_stderr = _run_ffmpeg(cpu_cmd, process_holder, cancel_check)
     if returncode != 0:
         cpu_tail = "\n".join((cpu_stderr or "").strip().splitlines()[-6:])
+        _remove_partial_output(output_path)
         raise RuntimeError(
             "FFmpeg reported an error while saving the clip without a seamless "
             "loop (the crossfade attempt also failed earlier).\n\n"
@@ -560,6 +563,7 @@ def _quick_trim(
     returncode, stderr = _run_ffmpeg(reencode_cmd, process_holder, cancel_check)
     if returncode != 0:
         tail_err = "\n".join((stderr or "").strip().splitlines()[-6:])
+        _remove_partial_output(output_path)
         raise RuntimeError(f"FFmpeg reported an error while extracting a loop segment:\n{tail_err}")
 
 
@@ -632,6 +636,7 @@ def _crossfade_two_clips(
     returncode, cpu_stderr = _run_ffmpeg(cpu_cmd, process_holder, cancel_check)
     if returncode != 0:
         cpu_tail = "\n".join((cpu_stderr or "").strip().splitlines()[-6:])
+        _remove_partial_output(output_path)
         raise RuntimeError(
             "FFmpeg reported an error while blending the loop transition.\n\n"
             f"GPU (NVENC) attempt failed with:\n{nvenc_tail}\n\n"
@@ -681,6 +686,7 @@ def _encode_segment(
     returncode, cpu_stderr = _run_ffmpeg(cpu_cmd, process_holder, cancel_check)
     if returncode != 0:
         cpu_tail = "\n".join((cpu_stderr or "").strip().splitlines()[-6:])
+        _remove_partial_output(output_path)
         raise RuntimeError(
             f"FFmpeg reported an error while encoding {error_context}.\n\n"
             f"GPU (NVENC) attempt failed with:\n{nvenc_tail}\n\n"
@@ -754,3 +760,90 @@ def _terminate(proc: subprocess.Popen):
         proc.kill()
     except Exception:
         pass
+
+
+def _remove_partial_output(path: str) -> None:
+    """
+    Best-effort removal of a partial/corrupt output file left behind by a
+    failed FFmpeg run.
+
+    FFmpeg (run with -y, as every command here is) creates and starts
+    writing the destination file as soon as it starts encoding - it
+    doesn't wait until the end to write anything. So a mid-encode failure
+    (a bad filter, an out-of-memory kill, running out of disk space, the
+    process being killed some other way) can leave a truncated, unplayable
+    file sitting at output_path. That's worse than no file at all: code
+    (or a person) checking "does the output exist?" could mistake its
+    mere presence for success. Called right before every "FFmpeg failed
+    for real" error is raised, so callers never have to deal with a
+    corrupt leftover after an exception - only ever a clean absence.
+
+    Deliberately swallows OSError: this is just tidy-up alongside a
+    failure that's already being reported through the exception being
+    raised; failing to clean up (e.g. a locked file on Windows) shouldn't
+    mask or replace the original, more important error.
+    """
+    try:
+        p = Path(path)
+        if p.exists():
+            p.unlink()
+    except OSError:
+        pass
+
+
+class OutputValidationError(RuntimeError):
+    """Raised by verify_output() when a produced file fails a sanity check."""
+
+
+def verify_output(path: str, expect_audio: bool) -> None:
+    """
+    Basic post-processing sanity check on a file LoopClip just produced:
+    it exists, is non-empty, FFprobe can actually open it, it has a video
+    stream, and (if expect_audio) an audio stream too.
+
+    This catches the gap between "FFmpeg exited with code 0" and "the
+    result is actually a usable video file" - which aren't the same
+    thing. FFmpeg can report success while still having produced an
+    unusable file: e.g. disk space running out right at the very end of
+    a write, after most of the encode had already completed successfully
+    and exit-code checks along the way all looked fine.
+
+    Raises OutputValidationError (a RuntimeError) with a specific,
+    human-readable reason on failure. Deliberately not called
+    automatically inside every processor.* function - callers that want
+    this extra check (the CLI end-to-end path, for example) call it
+    explicitly once processing is otherwise complete, so it stays a
+    single, final gate rather than adding an ffprobe round-trip after
+    every intermediate step.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise OutputValidationError(f"Output file was not created: {path}")
+    if p.stat().st_size <= 0:
+        raise OutputValidationError(f"Output file is empty (0 bytes): {path}")
+
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "stream=codec_type",
+                "-of", "csv=p=0", str(p),
+            ],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            creationflags=_NO_WINDOW,
+        )
+    except (OSError, FileNotFoundError) as exc:
+        raise OutputValidationError(
+            f"Could not verify the output file with FFprobe: {exc}"
+        ) from exc
+
+    if result.returncode != 0:
+        raise OutputValidationError(
+            f"FFprobe could not open the output file - it may be corrupt: {path}"
+        )
+
+    streams = result.stdout.strip().splitlines()
+    if "video" not in streams:
+        raise OutputValidationError(f"Output file has no video stream: {path}")
+    if expect_audio and "audio" not in streams:
+        raise OutputValidationError(f"Output file is missing its audio stream: {path}")

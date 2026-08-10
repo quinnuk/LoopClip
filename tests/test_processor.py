@@ -180,3 +180,64 @@ def test_seamless_loop_preserves_source_fps(make_test_clip, tmp_path):
         video_bitrate="2", no_audio=True,
     )
     assert processor.get_fps(out) == pytest.approx(60.0, abs=0.01)
+
+
+# --- verify_output ------------------------------------------------------------
+
+@requires_ffmpeg
+def test_verify_output_accepts_a_real_valid_clip(make_test_clip):
+    clip = make_test_clip("valid.mp4", width=64, height=64, fps=10, duration=1)
+    processor.verify_output(clip, expect_audio=False)  # should not raise
+
+
+def test_verify_output_rejects_missing_file():
+    with pytest.raises(processor.OutputValidationError, match="not created"):
+        processor.verify_output("/nonexistent/path/nope.mp4", expect_audio=False)
+
+
+def test_verify_output_rejects_empty_file(tmp_path):
+    empty = tmp_path / "empty.mp4"
+    empty.write_bytes(b"")
+    with pytest.raises(processor.OutputValidationError, match="empty"):
+        processor.verify_output(str(empty), expect_audio=False)
+
+
+@requires_ffmpeg
+def test_verify_output_rejects_corrupt_file(tmp_path):
+    junk = tmp_path / "junk.mp4"
+    junk.write_bytes(b"this is not a real video file, just junk bytes")
+    with pytest.raises(processor.OutputValidationError):
+        processor.verify_output(str(junk), expect_audio=False)
+
+
+@requires_ffmpeg
+def test_verify_output_rejects_missing_expected_audio(make_test_clip):
+    clip = make_test_clip("no_audio.mp4", width=64, height=64, fps=10, duration=1)
+    with pytest.raises(processor.OutputValidationError, match="audio"):
+        processor.verify_output(clip, expect_audio=True)
+
+
+# --- partial output cleanup on failure -----------------------------------
+
+@requires_ffmpeg
+def test_failed_encode_segment_cleans_up_partial_output(make_test_clip, tmp_path):
+    """A failed FFmpeg run must never leave a corrupt/partial file sitting
+    at the destination path - regression test for a real gap found during
+    hardening (encode fallbacks raised on failure without removing
+    whatever was already written to output_path)."""
+    clip = make_test_clip("src.mp4", width=64, height=64, fps=10, duration=2)
+    out = tmp_path / "broken_out.mp4"
+    # Simulate a leftover partial file from a previous crashed run, to
+    # make sure the failure path actually removes it rather than just
+    # never creating one.
+    out.write_bytes(b"leftover partial data from a previous failed run")
+
+    with pytest.raises(RuntimeError):
+        processor._encode_segment(
+            clip, str(out), start=5.0, end=1.0,  # invalid: end < start
+            video_bitrate="2", no_audio=True,
+            process_holder=None, cancel_check=None,
+            error_context="test segment",
+        )
+
+    assert not out.exists(), "partial/leftover output was not cleaned up after failure"

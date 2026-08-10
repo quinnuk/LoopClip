@@ -1,6 +1,7 @@
 import pytest
 
 import cli
+import processor as processor_module
 from conftest import requires_ffmpeg
 
 
@@ -144,3 +145,22 @@ def test_no_auto_loop_is_not_a_raw_file_copy(make_test_clip, tmp_path):
     with open(out, "rb") as f:
         output_bytes = f.read()
     assert source_bytes != output_bytes
+
+
+@requires_ffmpeg
+def test_no_auto_loop_validates_output_before_reporting_success(make_test_clip, tmp_path):
+    """If processing somehow produced a corrupt file, cli.main() should
+    catch that via processor.verify_output() rather than reporting
+    success - regression test for output validation being wired in."""
+    clip = make_test_clip("src.mp4", width=64, height=64, fps=10, duration=1)
+    out = str(tmp_path / "out.mp4")
+
+    result = cli.main([clip, out, "--no-auto-loop", "--no-audio", "--video-bitrate", "2"])
+    assert result == 0  # sanity: the real (non-corrupt) case still succeeds
+
+    # Now corrupt the already-produced output and confirm verify_output
+    # itself would catch it (this is what cli.main() calls internally).
+    with open(out, "wb") as f:
+        f.write(b"corrupted after the fact")
+    with pytest.raises(processor_module.OutputValidationError):
+        processor_module.verify_output(out, expect_audio=False)

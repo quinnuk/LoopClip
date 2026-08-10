@@ -274,6 +274,12 @@ def main(argv=None) -> int:
             )
             shutil.move(crossfaded, args.output)
 
+        try:
+            processor.verify_output(args.output, expect_audio=not args.no_audio)
+        except processor.OutputValidationError as exc:
+            print(f"\nError: FFmpeg reported success, but the output file failed validation: {exc}", file=sys.stderr)
+            return 1
+
         verb = "processed" if args.no_auto_loop else "created looped"
         print(f"\n\u2713 Successfully {verb} video: {args.output}")
         return 0
