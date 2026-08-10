@@ -271,6 +271,7 @@ class QueueManager:
                     item.speed = "-"
                     item.eta = "-"
                     item.error_message = ""
+                    item.warning_message = ""
                     self._notify()
                     return True
         return False
