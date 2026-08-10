@@ -57,6 +57,15 @@ def test_method_choice_enforced_by_argparse():
         cli.build_parser().parse_args(["in.mp4", "out.mp4", "--method", "not_a_real_method"])
 
 
+def test_version_flag_prints_version_and_exits(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        cli.build_parser().parse_args(["--version"])
+    assert exc_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "LoopClip" in out
+    assert cli.__version__ in out
+
+
 # --- end-to-end: --no-auto-loop actually processes through the pipeline ----
 # (regression test for the old behavior: a raw shutil.copy2() that silently
 # ignored --video-bitrate/--audio-bitrate/--no-audio/--quality)

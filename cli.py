@@ -34,6 +34,7 @@ from typing import Optional
 import downloader
 import loop_detector
 import processor
+from version import __version__
 
 
 def _print_progress(phase: str, done: int, total: int):
@@ -51,6 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("input", help="YouTube URL or path to a local video file")
     parser.add_argument("output", help="Path for the output video file")
+    parser.add_argument(
+        "--version", action="version", version=f"LoopClip {__version__}",
+    )
 
     parser.add_argument("--start", default="00:00:00", help="Start of the search window (HH:MM:SS)")
     parser.add_argument("--stop", default=None, help="End of the search window (HH:MM:SS); default: end of video")

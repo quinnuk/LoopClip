@@ -29,6 +29,7 @@ import processor
 import settings as settings_module
 from queue_manager import QueueItem, QueueManager, QueueState
 from tool_check import missing_tools_message
+from version import __version__
 
 try:
     import pyperclip
@@ -217,7 +218,7 @@ class LoopClipApp(ctk.CTk):
         super().__init__()
         self.configure(fg_color=COLOR_BG)
 
-        self.title("LoopClip")
+        self.title(f"LoopClip {__version__}")
         self.geometry("700x820")
         self.minsize(640, 700)
         self.resizable(True, True)
