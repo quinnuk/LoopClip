@@ -57,7 +57,7 @@ It was originally built for **Projectivy Launcher** on a 4K TV, but works for an
 **Quality & encoding**
 - Quality modes: Best Available, 4K HDR Preferred, or 1080p Compatible
 - Stream-copy trimming (no re-encode, no quality loss), with automatic re-encode fallback if a codec can't be cut cleanly
-- Re-encode fallback targets H.265/HEVC, forced 4K UHD (3840×2160), 30fps, with a user-selectable bitrate (8 / 15 / 25 / 40 Mbps)
+- Re-encode fallback targets H.265/HEVC at a user-selectable bitrate (8 / 15 / 25 / 40 Mbps), preserving the source's native resolution and frame rate — only downscaling if the source is wider than 4K (3840px), never upscaling a smaller source up to it, and never forcing a fixed frame rate
 - GPU-accelerated encoding via NVIDIA NVENC when available, with automatic CPU (libx265) fallback
 
 **Looping & trimming**
@@ -94,7 +94,7 @@ If you'd rather run from source or build the exe yourself, see [Getting Started]
 | Windows 11 | |
 | Python 3.10+ | Only needed if running from source |
 | [FFmpeg](https://ffmpeg.org/download.html) | Must be installed and on your system PATH — the app checks and will tell you if it's missing |
-| NVIDIA GPU (optional) | Enables fast NVENC encoding; falls back to CPU automatically if unavailable. CPU encoding at forced 4K can be significantly slower, especially with seamless loop enabled |
+| NVIDIA GPU (optional) | Enables fast NVENC encoding; falls back to CPU automatically if unavailable. CPU encoding of 4K sources can be significantly slower, especially with seamless loop enabled |
 | — | Auto-detect seamless loop's frame analysis currently runs on CPU only. Long search windows analyzed at "Every frame" can take a while on slower machines — narrowing the search window helps. GPU-accelerated analysis may come in a future update |
 
 ## Getting Started
@@ -110,6 +110,15 @@ python main.py
 ```
 
 If your Python install already has the required packages available globally, you can skip the virtual environment and go straight to `pip install -r requirements.txt` followed by `python main.py`.
+
+### Running the test suite
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/
+```
+
+The suite is self-contained — it generates its own small test videos with FFmpeg's `lavfi` source filters rather than relying on committed fixture files, so no extra setup is needed beyond having `ffmpeg`/`ffprobe` on PATH (tests that need them skip cleanly, rather than failing, if they're not available). GitHub Actions runs this same suite on every push/PR before building an exe.
 
 ### Running without building an .exe
 
@@ -170,7 +179,9 @@ python cli.py https://youtu.be/XXXXXXXXXXX output.mp4 --similarity 95 --method h
 # Only analyze a specific window of a long video
 python cli.py input.mp4 output.mp4 --start 00:00:30 --stop 00:05:00 --downsample 4
 
-# Skip auto-detection entirely - just download/re-encode as-is
+# Skip auto-detection - downloads/re-encodes the full source through the
+# normal pipeline instead (still honours --quality, --video-bitrate,
+# --audio-bitrate, --no-audio), just without trimming to a detected loop
 python cli.py https://youtu.be/XXXXXXXXXXX output.mp4 --no-auto-loop
 ```
 
@@ -180,18 +191,22 @@ python cli.py https://youtu.be/XXXXXXXXXXX output.mp4 --no-auto-loop
 |---|---|
 | `input` | YouTube URL or path to a local video file |
 | `output` | Path for the output video file |
+| `--version` | Print the LoopClip version and exit |
 | `--start`, `--stop` | Search window for loop detection (`HH:MM:SS`); default is the full video |
 | `--similarity` | Match threshold, 0–100 (default: `98`) |
 | `--method` | Comparison method: `combined`, `ssim`, `histogram`, or `hash` (default: `combined`) |
 | `--downsample` | Analyze every Nth frame — higher is faster but less precise (default: `1`) |
 | `--min-length`, `--max-length` | Minimum/maximum loop length in seconds |
-| `--no-auto-loop` | Skip loop detection entirely; just download/re-encode the source as-is |
+| `--no-auto-loop` | Skip loop detection - the source is still fully processed through the normal pipeline (bitrate/audio/quality settings still apply), just without trimming to a detected loop |
 | `--crossfade` | Seconds of crossfade to blend at the loop point (omit for a hard cut) |
 | `--quality` | Download quality mode: `best`, `4k_hdr`, or `1080p` (default: `best`) |
 | `--video-bitrate` | Target video bitrate in Mbps for re-encodes (default: `15`) |
 | `--audio-bitrate` | Audio bitrate: `original` or a kbps value (default: `original`) |
 | `--no-audio` | Strip audio from the output |
+| `--gpu` / `--no-gpu` | No-op placeholder — encoding already tries NVIDIA NVENC first automatically, with automatic CPU fallback; frame analysis for auto-detect is CPU-only regardless of this flag |
 | `--verbose` | Print extra progress detail during frame analysis |
+
+Every argument above is validated before any download or processing starts (invalid ranges, malformed times, `--min-length` ≥ `--max-length`, etc. are all rejected up front with a specific error message, rather than surfacing later as a cryptic FFmpeg failure).
 
 Run `python cli.py --help` at any time to see this listed directly from the tool.
 
@@ -220,25 +235,30 @@ The finished executable lands at `LoopClip.exe` in the project root (PyInstaller
 ```
 LoopClip/
 ├── main.py                  # GUI + orchestration (CustomTkinter)
-├── cli.py                    # Command-line interface: download/analyze/encode without the GUI
-├── downloader.py             # yt-dlp wrapper: URL validation, format selection, progress
-├── processor.py              # FFmpeg wrapper: trimming, re-encoding, seamless loop crossfade
-├── loop_detector.py          # Auto-detect seamless loop: frame extraction + similarity search
-├── queue_manager.py          # Owns the download queue and its background worker thread
-├── settings.py               # Persisted settings (JSON in %APPDATA%\LoopClip)
-├── tool_check.py              # Detects yt-dlp / FFmpeg availability
-├── LoopClip.vbs               # Silent launcher (no console window)
-├── Run LoopClip.bat           # Alternative silent launcher
-├── build_exe.bat              # One-click rebuild of LoopClip.exe
-└── requirements.txt
+├── cli.py                   # Command-line interface: download/analyze/encode without the GUI
+├── downloader.py            # yt-dlp wrapper: URL validation, format selection, progress
+├── processor.py             # FFmpeg wrapper: trimming, re-encoding, seamless loop crossfade
+├── loop_detector.py         # Auto-detect seamless loop: frame extraction + similarity search
+├── queue_manager.py         # Owns the download queue and its background worker thread
+├── settings.py              # Persisted settings (JSON in %APPDATA%\LoopClip, written atomically)
+├── tool_check.py            # Detects yt-dlp / FFmpeg availability
+├── version.py               # Single source of truth for the app version
+├── tests/                   # Automated test suite (pytest) - see "Running the test suite" above
+├── .github/workflows/       # CI: test -> build -> verify -> release, on every push/PR and release
+├── LoopClip.vbs             # Silent launcher (no console window)
+├── Run LoopClip.bat         # Alternative silent launcher
+├── build_exe.bat            # One-click rebuild of LoopClip.exe
+├── requirements.txt         # Runtime dependencies
+└── requirements-dev.txt     # Test/development-only dependencies (pytest)
 ```
 
 ## Quality Handling Notes
 
 - **Best Available** lets yt-dlp pick the actual best video+audio streams regardless of codec (AV1/VP9/H.264).
 - Trimming uses `ffmpeg -c copy` (stream copy) first, so no quality is lost and processing is nearly instant. It only falls back to a re-encode if the source codec doesn't allow a clean copy-cut at that timestamp.
-- When a re-encode is needed, it targets H.265/HEVC at your chosen bitrate, always at full 4K UHD resolution regardless of source resolution, and tries NVIDIA NVENC (GPU) first before falling back to CPU.
-- The seamless loop crossfade step, if enabled, always re-encodes (it can't be done as a stream copy), using the same H.265/NVENC-first/4K approach, and runs as a final pass after trimming.
+- When a re-encode is needed, it targets H.265/HEVC at your chosen bitrate, preserving the source's resolution and frame rate — only downscaling if the source is wider than 4K (3840px, never upscaling a smaller source up to it) and never forcing a fixed frame rate — and tries NVIDIA NVENC (GPU) first before falling back to CPU.
+- The seamless loop crossfade step, if enabled, always re-encodes (it can't be done as a stream copy). It normalizes every piece it blends to a single fixed frame rate matching the source's own (required for the crossfade filter to work reliably), using the same H.265/NVENC-first/resolution-cap approach, and runs as a final pass after trimming.
+- Every output file is verified after processing (exists, non-empty, readable by FFprobe, has the expected video/audio streams) before being reported as finished — if FFmpeg reports success but the result is somehow unusable, this catches it rather than leaving a broken file behind.
 
 ## About the Rename
 
