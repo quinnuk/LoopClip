@@ -1,3 +1,4 @@
+import platform
 import shutil
 import sys
 from pathlib import Path
@@ -44,14 +45,35 @@ def test_safe_float_falls_back_on_none():
     assert main._safe_float(None, 98.0) == 98.0
 
 
-def _xvfb_available():
-    return shutil.which("Xvfb") is not None or shutil.which("xvfb-run") is not None
+def _can_run_gui():
+    """
+    Whether a real Tk display is available to actually run (not just
+    import) GUI code in this run:
+    - Windows CI (windows-latest) always has an interactive desktop
+      session available, so GUI code can run directly there.
+    - Linux (this sandbox, most local dev machines, self-hosted CI) has
+      no display by default and needs Xvfb as a virtual one.
+    - macOS is assumed to have a display (headless macOS CI is rare and
+      not a target platform for this Windows-focused app).
+    """
+    if not tkinter_available:
+        return False
+    if platform.system() == "Windows" or platform.system() == "Darwin":
+        return True
+    return shutil.which("Xvfb") is not None and shutil.which("xvfb-run") is not None
 
 
 requires_display = pytest.mark.skipif(
-    not (tkinter_available and _xvfb_available()),
-    reason="tkinter/Xvfb not available for a real GUI test on this machine",
+    not _can_run_gui(), reason="no real or virtual display available for a GUI test on this machine"
 )
+
+
+def _wrap_for_display(cmd: list) -> list:
+    """Runs `cmd` directly on Windows/macOS (a real display is already
+    available there); wraps it with xvfb-run on Linux, where one isn't."""
+    if platform.system() in ("Windows", "Darwin"):
+        return cmd
+    return ["xvfb-run", "-a", *cmd]
 
 
 @requires_display
@@ -104,7 +126,7 @@ else:
     print("OK")
 '''
     result = subprocess.run(
-        ["xvfb-run", "-a", sys.executable, "-c", script],
+        _wrap_for_display([sys.executable, "-c", script]),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         cwd=str(Path(__file__).resolve().parent.parent), timeout=30,
     )
