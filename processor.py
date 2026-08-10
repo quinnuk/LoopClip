@@ -84,9 +84,79 @@ def seconds_to_ffmpeg_time(total_seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
 
+_WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+# Leaves headroom for the " - Nmin loop.mp4" suffix this app appends, plus
+# whatever destination folder path it ends up under - long YouTube titles
+# (some run past 100 characters) could otherwise combine with a deep
+# output folder to exceed Windows' historical 260-character MAX_PATH.
+_MAX_SANITIZED_TITLE_LENGTH = 150
+
+
 def sanitize_title(title: str) -> str:
-    """Removes characters that are illegal in Windows filenames."""
-    return re.sub(r'[\\/:*?"<>|]', "", title).strip()
+    """
+    Makes a string safe to use as (part of) a Windows filename.
+
+    Handles more than just the characters Windows forbids outright
+    (\\/:*?"<>|):
+    - strips control characters (0x00-0x1F), which are technically
+      illegal in NTFS filenames too and can occasionally slip through
+      into a YouTube video title
+    - strips trailing dots/spaces - Windows silently drops these when a
+      file is actually created, which would otherwise make the name
+      LoopClip displays/tracks differ from the name Windows actually
+      kept on disk
+    - rejects the reserved device names (CON, PRN, AUX, NUL, COM1-9,
+      LPT1-9) that are unusable as a filename on Windows regardless of
+      extension, by prefixing rather than silently dropping the title
+    - caps length (see _MAX_SANITIZED_TITLE_LENGTH) so a long source
+      title can't push the full output path over Windows' path length
+      limits
+    - falls back to "video" if nothing usable is left after cleaning
+      (e.g. a title that was entirely illegal characters)
+    """
+    cleaned = re.sub(r'[\x00-\x1f\\/:*?"<>|]', "", title or "")
+    cleaned = cleaned.strip().rstrip(" .")
+
+    if len(cleaned) > _MAX_SANITIZED_TITLE_LENGTH:
+        cleaned = cleaned[:_MAX_SANITIZED_TITLE_LENGTH].rstrip(" .")
+
+    if not cleaned:
+        cleaned = "video"
+
+    if cleaned.upper() in _WINDOWS_RESERVED_NAMES:
+        cleaned = f"_{cleaned}"
+
+    return cleaned
+
+
+def unique_output_path(path: str) -> str:
+    """
+    If `path` doesn't already exist, returns it unchanged. If it does,
+    returns a variant with ' (2)', ' (3)', etc. inserted before the
+    extension, trying successive numbers until an unused path is found.
+
+    Generated output filenames are derived from the source video's
+    title, so two different source videos that happen to share a title
+    (e.g. two separate uploads/re-uploads of "Aquarium 4K") would
+    otherwise both resolve to the exact same output path - and every
+    encode here runs FFmpeg with -y, which overwrites the destination
+    without asking. This is the guard against that: called once, right
+    when an output path is first decided, before any processing starts.
+    """
+    p = Path(path)
+    if not p.exists():
+        return path
+    n = 2
+    while True:
+        candidate = p.with_name(f"{p.stem} ({n}){p.suffix}")
+        if not candidate.exists():
+            return str(candidate)
+        n += 1
 
 
 def build_output_filename(title: str, duration_seconds: float) -> str:

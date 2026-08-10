@@ -78,6 +78,60 @@ def test_sanitize_title_preserves_safe_characters():
     assert processor.sanitize_title("Aquarium 4K - 60fps (HDR)") == "Aquarium 4K - 60fps (HDR)"
 
 
+def test_sanitize_title_strips_control_characters():
+    dirty = "Video\x00Title\x1fWith\x07Control\x1bChars"
+    clean = processor.sanitize_title(dirty)
+    assert all(ord(c) >= 0x20 for c in clean)
+
+
+def test_sanitize_title_strips_trailing_dots_and_spaces():
+    # Windows silently drops these when the file is actually created, so
+    # sanitize_title should match what Windows would keep, not leave a
+    # trailing "..." that would quietly disappear.
+    assert processor.sanitize_title("My Video...   ") == "My Video"
+
+
+@pytest.mark.parametrize("reserved", ["CON", "con", "PRN", "AUX", "NUL", "COM1", "LPT9"])
+def test_sanitize_title_prefixes_windows_reserved_names(reserved):
+    result = processor.sanitize_title(reserved)
+    assert result != reserved  # must not be usable as a bare filename
+    assert result.upper() not in processor._WINDOWS_RESERVED_NAMES
+
+
+@pytest.mark.parametrize("empty_ish", ["", "   ", "***", "///", "...", None])
+def test_sanitize_title_falls_back_to_default_when_nothing_usable_remains(empty_ish):
+    result = processor.sanitize_title(empty_ish)
+    assert result == "video"
+
+
+def test_sanitize_title_caps_length():
+    long_title = "A" * 300
+    result = processor.sanitize_title(long_title)
+    assert len(result) <= processor._MAX_SANITIZED_TITLE_LENGTH
+
+
+# --- unique_output_path -------------------------------------------------------
+
+def test_unique_output_path_returns_unchanged_when_no_collision(tmp_path):
+    target = str(tmp_path / "Aquarium 4K.mp4")
+    assert processor.unique_output_path(target) == target
+
+
+def test_unique_output_path_avoids_a_single_collision(tmp_path):
+    target = tmp_path / "Aquarium 4K.mp4"
+    target.write_bytes(b"existing user file - must not be silently overwritten")
+    result = processor.unique_output_path(str(target))
+    assert result == str(tmp_path / "Aquarium 4K (2).mp4")
+
+
+def test_unique_output_path_skips_past_multiple_collisions(tmp_path):
+    (tmp_path / "clip.mp4").write_bytes(b"x")
+    (tmp_path / "clip (2).mp4").write_bytes(b"x")
+    (tmp_path / "clip (3).mp4").write_bytes(b"x")
+    result = processor.unique_output_path(str(tmp_path / "clip.mp4"))
+    assert result == str(tmp_path / "clip (4).mp4")
+
+
 @pytest.mark.parametrize("duration, expected_suffix", [
     (15, "15s loop"),
     (45.2, "45s loop"),

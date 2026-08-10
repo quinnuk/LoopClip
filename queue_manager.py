@@ -490,7 +490,7 @@ class QueueManager:
                     out_name = processor.build_output_filename(result.title, local_duration_seconds)
                 else:
                     out_name = f"{processor.sanitize_title(result.title)}.mp4"
-                out_path = str(Path(item.output_folder) / out_name)
+                out_path = processor.unique_output_path(str(Path(item.output_folder) / out_name))
 
                 processor.process_video(
                     input_path=result.filepath,
@@ -508,7 +508,7 @@ class QueueManager:
                 item.operation = "Saving..."
                 self._notify()
                 clean_title = processor.sanitize_title(result.title)
-                out_path = str(Path(item.output_folder) / f"{clean_title}.mp4")
+                out_path = processor.unique_output_path(str(Path(item.output_folder) / f"{clean_title}.mp4"))
                 if str(Path(result.filepath).resolve()) != str(Path(out_path).resolve()):
                     shutil.move(result.filepath, out_path)
 
