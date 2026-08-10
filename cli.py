@@ -283,6 +283,29 @@ def main(argv=None) -> int:
         verb = "processed" if args.no_auto_loop else "created looped"
         print(f"\n\u2713 Successfully {verb} video: {args.output}")
         return 0
+    except KeyboardInterrupt:
+        print("\n\nCancelled.", file=sys.stderr)
+        return 130  # conventional shell exit code for Ctrl+C / SIGINT
+    except (downloader.CancelledError, processor.CancelledError):
+        print("\n\nCancelled.", file=sys.stderr)
+        return 130
+    except RuntimeError as exc:
+        # downloader.py and processor.py both normalize their real
+        # failures (yt-dlp errors, FFmpeg failures) into RuntimeError
+        # with an already human-readable message - printing it directly
+        # here (instead of letting it propagate as an unhandled
+        # exception) is the difference between a normal user seeing a
+        # clear "Error: ..." line versus a raw Python traceback.
+        print(f"\nError: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - last-resort net for genuinely unexpected bugs
+        print(
+            f"\nUnexpected error: {exc}\n"
+            "This may be a bug - if it keeps happening, please open an issue "
+            "at https://github.com/quinnuk/LoopClip/issues",
+            file=sys.stderr,
+        )
+        return 1
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 

@@ -131,6 +131,24 @@ def test_no_auto_loop_end_to_end_keeps_audio_by_default(tmp_path):
 
 
 @requires_ffmpeg
+def test_processing_failure_prints_clean_error_not_a_traceback(tmp_path, capsys):
+    """Regression test: cli.main() previously let RuntimeError from
+    processor.process_video() propagate unhandled, dumping a raw Python
+    traceback to a normal user's console instead of the already
+    human-readable message the exception carries."""
+    bad_input = tmp_path / "corrupt.mp4"
+    bad_input.write_bytes(b"this is not a real video file at all")
+    out = str(tmp_path / "out.mp4")
+
+    code = cli.main([str(bad_input), out, "--no-auto-loop", "--no-audio"])
+
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "Traceback (most recent call last)" not in captured.err
+    assert "Error:" in captured.err
+
+
+@requires_ffmpeg
 def test_no_auto_loop_is_not_a_raw_file_copy(make_test_clip, tmp_path):
     """The old behavior was shutil.copy2(source, output) - byte-identical
     to the input. The fixed behavior re-encodes, so file size/bytes should

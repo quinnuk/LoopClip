@@ -59,6 +59,25 @@ TEMP_ROOT = Path(tempfile.gettempdir()) / "LoopClip" / "Temp"
 
 CLIPBOARD_POLL_MS = 150  # near-instant clipboard pickup
 
+
+def _safe_float(text: str, default: float) -> float:
+    """
+    Parses `text` as a float, falling back to `default` instead of raising
+    if it isn't a valid number.
+
+    Used for fields whose value only matters when a related option is
+    enabled (e.g. the similarity box when auto-loop detection is off) -
+    _validate_loop_settings() already blocks "Add to Queue" with a clear
+    message when that field's value *does* matter and is invalid, but
+    when it doesn't matter, silently falling back here (rather than still
+    hard-parsing it) avoids the field crashing item creation over a value
+    the user isn't even using.
+    """
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return default
+
 STATE_COLORS = {
     QueueState.QUEUED: "#9AA0A6",
     QueueState.DOWNLOADING: "#3B8EEA",
@@ -911,7 +930,7 @@ class LoopClipApp(ctk.CTk):
                 video_bitrate=self._label_to_video_bitrate(self.video_bitrate_var.get()),
                 auto_loop=self.auto_loop_var.get(),
                 loop_method=self._label_to_loop_method(self.loop_method_var.get()),
-                similarity=float(self.similarity_entry.get().strip() or 98),
+                similarity=_safe_float(self.similarity_entry.get().strip(), 98.0),
                 search_start=(
                     self.search_start_entry.get().strip() if self.limit_search_var.get() else "00:00:00"
                 ),
@@ -991,7 +1010,7 @@ class LoopClipApp(ctk.CTk):
             "video_bitrate": self._label_to_video_bitrate(self.video_bitrate_var.get()),
             "auto_loop": self.auto_loop_var.get(),
             "loop_method": self._label_to_loop_method(self.loop_method_var.get()),
-            "similarity": float(self.similarity_entry.get().strip() or 98),
+            "similarity": _safe_float(self.similarity_entry.get().strip(), 98.0),
             "search_start": (
                 self.search_start_entry.get().strip() if self.limit_search_var.get() else "00:00:00"
             ),
