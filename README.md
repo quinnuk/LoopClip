@@ -50,6 +50,8 @@ It was originally built for **Projectivy Launcher** on a 4K TV, but works for an
 
 **Core workflow**
 - Paste a URL, click **Add to Queue** — with clipboard auto-detect for YouTube links
+- **Drag and drop** — drop a YouTube link straight onto the window to fill the URL box, or drop one or more local video files to queue them directly (skipping the download step entirely)
+- **Playlist and channel links** — paste a playlist or channel URL and every video in it is automatically queued, one item per video
 - Queue-based downloads — add several videos, then let them process unattended
 - Per-item progress (percent / speed / ETA) that updates smoothly, even with a full queue
 - **Clear URL** and **Clear Queue** buttons for quickly resetting either
@@ -63,19 +65,21 @@ It was originally built for **Projectivy Launcher** on a 4K TV, but works for an
 **Looping & trimming**
 - Trim by entering Hours / Minutes / Seconds in simple digit boxes — no free-text time formats to get wrong
 - **Auto-detect seamless loop** — analyzes a video (or a window within it) and automatically finds the best-matching loop point for you. See [Auto-Detect Seamless Loop](#auto-detect-seamless-loop) below.
+- Optional **GPU-accelerated loop analysis** via CuPy, when a compatible NVIDIA GPU/CUDA setup is detected — falls back to CPU automatically otherwise. Worth knowing: this speeds up the comparison stage specifically, which is already fast at the app's default search size, so the difference is most noticeable with a widened search window or on an older CPU rather than on a typical short search
 - Optional **seamless loop crossfade** that blends a clip's end into its start, with adjustable length (1 / 2 / 3 sec) — if the crossfade can't be built for some reason, LoopClip falls back to saving a plain trimmed clip instead of losing the whole item, with a note shown next to the finished file
 
 **Command line**
 - Full CLI (`cli.py`) for scripting/automation — download-or-local-file input, auto-detect loop, crossfade, and encode, all from one command with no GUI required. See [Command-Line Interface](#command-line-interface).
 
 **Quality of life**
+- **Video library** — a persistent record of every video LoopClip has finished, with Open Folder and Remove-from-list actions, so past output isn't only whatever's still visible in the current queue
 - Adjustable output audio bitrate, or mute entirely
 - Settings remembered between runs, and auto-migrated if upgrading from Aquarium Downloader
 - Friendly, specific error messages for missing tools, bad URLs, network failures, low disk space, and failures at any stage of processing (not just downloading)
 - **Retry** on a failed item reuses the already-downloaded source file if the download itself succeeded and a later step failed, instead of downloading the video again
 - Dark, Windows 11–style UI (CustomTkinter)
 
-> **Not yet included:** drag-and-drop, a video library manager, playlist/channel downloads. (Auto-detect's frame analysis is currently CPU-only — see [Requirements](#requirements).)
+> **GUI-only features:** drag-and-drop, the video library, and playlist/channel expansion are all part of the desktop app (`main.py`) — `cli.py` doesn't expose them, since it's designed around a single input/output pair per command.
 
 ## Download
 
@@ -95,7 +99,8 @@ If you'd rather run from source or build the exe yourself, see [Getting Started]
 | Python 3.10+ | Only needed if running from source |
 | [FFmpeg](https://ffmpeg.org/download.html) | Must be installed and on your system PATH — the app checks and will tell you if it's missing |
 | NVIDIA GPU (optional) | Enables fast NVENC encoding; falls back to CPU automatically if unavailable. CPU encoding of 4K sources can be significantly slower, especially with seamless loop enabled |
-| — | Auto-detect seamless loop's frame analysis currently runs on CPU only. Long search windows analyzed at "Every frame" can take a while on slower machines — narrowing the search window helps. GPU-accelerated analysis may come in a future update |
+| NVIDIA GPU + CuPy (optional) | Enables the optional GPU-accelerated loop-analysis path (`pip install cupy-cuda12x`, matched to your CUDA version). Not required — the checkbox stays off automatically if this isn't set up, and analysis runs on CPU exactly as before |
+| — | Long search windows analyzed at "Every frame" can still take a while on slower machines regardless of the GPU option above, since video decoding itself (not the comparison step) is the slow part — narrowing the search window helps more than the GPU option does |
 
 ## Getting Started
 
@@ -130,11 +135,11 @@ Once dependencies are installed, any of these will start the app:
 
 ## How to Use
 
-1. **Paste a YouTube URL** into the box at the top, or just copy one from your browser — LoopClip detects it and fills the box in automatically.
+1. **Paste a YouTube URL** into the box at the top, or just copy one from your browser — LoopClip detects it and fills the box in automatically. You can also **drag and drop** a link, or a local video file, straight onto the window. Pasting a **playlist or channel link** queues every video it contains automatically.
 2. **Set your options** — output folder, download quality, video/audio bitrate, and optionally an automatic trim (start time + duration). Turn on **seamless loop crossfade** if you want the clip to fade into itself at the loop point, and **auto-detect seamless loop** if you want LoopClip to find that loop point for you.
 3. Click **Add to Queue**. Repeat for as many videos as you like — each one remembers whatever options were set at the moment it was added. If you change a setting (e.g. Similarity %) after an item is already queued, re-add it rather than relying on **Retry** to pick up the change.
 4. Click **Start Queue**. Videos download and process one at a time; watch progress in the list below. **Cancel** stops the current item immediately and halts the rest of the queue.
-5. Finished files land in your chosen output folder, ready to point Projectivy (or any other screensaver/wallpaper tool) at.
+5. Finished files land in your chosen output folder, ready to point Projectivy (or any other screensaver/wallpaper tool) at. Every finished video is also added to the **Library** (top of the window), so you can find it again later even after clearing the queue.
 
 > **Trimming tip:** each time box is Hours / Minutes / Seconds, in that order — type digits and it auto-advances to the next box. A start time of `00:03:00` with a duration of `00:05:00` gives you a 5-minute clip starting 3 minutes into the source video.
 
@@ -203,7 +208,7 @@ python cli.py https://youtu.be/XXXXXXXXXXX output.mp4 --no-auto-loop
 | `--video-bitrate` | Target video bitrate in Mbps for re-encodes (default: `15`) |
 | `--audio-bitrate` | Audio bitrate: `original` or a kbps value (default: `original`) |
 | `--no-audio` | Strip audio from the output |
-| `--gpu` / `--no-gpu` | No-op placeholder — encoding already tries NVIDIA NVENC first automatically, with automatic CPU fallback; frame analysis for auto-detect is CPU-only regardless of this flag |
+| `--gpu` / `--no-gpu` | No-op placeholder — encoding already tries NVIDIA NVENC first automatically, with automatic CPU fallback. (The GUI's optional GPU-accelerated loop-analysis path isn't exposed here — `cli.py` always analyzes on CPU.) |
 | `--verbose` | Print extra progress detail during frame analysis |
 
 Every argument above is validated before any download or processing starts (invalid ranges, malformed times, `--min-length` ≥ `--max-length`, etc. are all rejected up front with a specific error message, rather than surfacing later as a cryptic FFmpeg failure).
@@ -238,8 +243,9 @@ LoopClip/
 ├── cli.py                   # Command-line interface: download/analyze/encode without the GUI
 ├── downloader.py            # yt-dlp wrapper: URL validation, format selection, progress
 ├── processor.py             # FFmpeg wrapper: trimming, re-encoding, seamless loop crossfade
-├── loop_detector.py         # Auto-detect seamless loop: frame extraction + similarity search
+├── loop_detector.py         # Auto-detect seamless loop: frame extraction + similarity search (optional GPU path via CuPy)
 ├── queue_manager.py         # Owns the download queue and its background worker thread
+├── library.py               # Persistent record of finished videos, shown in the GUI's Library dialog
 ├── settings.py              # Persisted settings (JSON in %APPDATA%\LoopClip, written atomically)
 ├── tool_check.py            # Detects yt-dlp / FFmpeg availability
 ├── version.py               # Single source of truth for the app version

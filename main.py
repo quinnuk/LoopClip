@@ -16,6 +16,7 @@ two-column options layout with a segmented quality selector):
 import json
 import os
 import platform
+import re
 import tempfile
 import threading
 import time
@@ -27,11 +28,26 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+import library
+import loop_detector
 import processor
 import settings as settings_module
 from queue_manager import QueueItem, QueueManager, QueueState
 from tool_check import check_ffmpeg, check_nvenc, get_ffmpeg_version, missing_tools_message
 from version import __version__
+
+try:
+    from tkinterdnd2 import DND_FILES, DND_TEXT, TkinterDnD
+    HAS_DND = True
+except ImportError:
+    HAS_DND = False
+
+# Video file extensions recognized when a local file is dropped onto the
+# app - deliberately generous (anything FFmpeg is likely to open), since
+# processor.py/FFmpeg is what actually validates the file, not this list.
+LOCAL_VIDEO_EXTENSIONS = {
+    ".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".wmv", ".flv", ".ts",
+}
 
 try:
     import pyperclip
@@ -249,6 +265,7 @@ class LoopClipApp(ctk.CTk):
         self.queue_manager = QueueManager(on_update=self._on_queue_update, temp_root=TEMP_ROOT)
 
         self._build_ui()
+        self._init_drag_and_drop()
 
         self._last_seen_clip = None
         self._poll_clipboard()
@@ -407,6 +424,107 @@ class LoopClipApp(ctk.CTk):
         dialog.geometry(f"{dialog_width}x{dialog.winfo_reqheight()}")
         dialog.minsize(dialog_width, dialog.winfo_reqheight())
 
+    def _show_library_dialog(self):
+        """
+        Shows every video LoopClip has ever finished (persisted in
+        library.py, so this survives clearing the queue or restarting the
+        app) - title, when it finished, and its output path, each with
+        Open Folder / Remove-from-library buttons. Removing an entry only
+        removes it from this list; it never deletes the actual video file.
+        """
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("LoopClip Library")
+        dialog.configure(fg_color=COLOR_BG)
+        dialog.geometry("560x480")
+        dialog.minsize(420, 300)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ctk.CTkLabel(
+            dialog, text="Finished Videos", font=ctk.CTkFont(size=15, weight="bold"),
+        ).pack(pady=(16, 2))
+        ctk.CTkLabel(
+            dialog, text="A record of everything LoopClip has finished processing.",
+            font=ctk.CTkFont(size=11), text_color="gray60",
+        ).pack(pady=(0, 10))
+
+        list_frame = ctk.CTkFrame(dialog, fg_color=COLOR_PANEL)
+        list_frame.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+        scroll = ctk.CTkScrollableFrame(list_frame, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=8, pady=8)
+
+        def _render():
+            for child in scroll.winfo_children():
+                child.destroy()
+            entries = library.load_entries()
+            if not entries:
+                ctk.CTkLabel(
+                    scroll, text="Nothing finished yet - it'll show up here once a video completes.",
+                    text_color="#9AA0A6",
+                ).pack(anchor="w", pady=8, padx=4)
+                return
+            for index, entry in enumerate(entries):
+                self._create_library_row(scroll, index, entry, _render)
+
+        _render()
+
+        ctk.CTkButton(
+            dialog, text="Close", width=100, fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOVER, command=dialog.destroy,
+        ).pack(pady=(0, 16))
+
+    def _create_library_row(self, parent, index: int, entry: dict, refresh_callback):
+        row = ctk.CTkFrame(parent, fg_color="#2B2B2F", corner_radius=6)
+        row.pack(fill="x", pady=3, padx=2)
+
+        top = ctk.CTkFrame(row, fg_color="transparent")
+        top.pack(fill="x", padx=10, pady=(8, 2))
+        title = entry.get("title") or "(untitled)"
+        if len(title) > 56:
+            title = title[:53] + "..."
+        ctk.CTkLabel(top, text=title, anchor="w", font=ctk.CTkFont(weight="bold")).pack(
+            side="left", fill="x", expand=True
+        )
+        finished_at = entry.get("finished_at", "")
+        # Just the date portion (YYYY-MM-DD) of the stored ISO timestamp -
+        # enough to place it in time without a wall of text per row.
+        date_text = finished_at.split("T")[0] if finished_at else ""
+        ctk.CTkLabel(top, text=date_text, font=ctk.CTkFont(size=11), text_color="gray60").pack(side="right")
+
+        detail = ctk.CTkFrame(row, fg_color="transparent")
+        detail.pack(fill="x", padx=10, pady=(0, 8))
+        output_path = entry.get("output_path", "")
+        path_exists = output_path and Path(output_path).exists()
+        status_text = output_path if path_exists else f"{output_path}  (file no longer found)"
+        ctk.CTkLabel(
+            detail, text=status_text, anchor="w", font=ctk.CTkFont(size=11),
+            text_color="gray60" if path_exists else "#E3B341", wraplength=380,
+        ).pack(side="left", fill="x", expand=True)
+
+        btn_row = ctk.CTkFrame(row, fg_color="transparent")
+        btn_row.pack(side="right", padx=(6, 10))
+        ctk.CTkButton(
+            btn_row, text="Open Folder", width=90, height=22, font=ctk.CTkFont(size=11),
+            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
+            state="normal" if path_exists else "disabled",
+            command=lambda p=output_path: self._open_containing_folder(p),
+        ).pack(side="left", padx=(0, 6))
+
+        def _remove(i=index):
+            library.remove_entry(i)
+            refresh_callback()
+
+        ctk.CTkButton(
+            btn_row, text="Remove", width=70, height=22, font=ctk.CTkFont(size=11),
+            fg_color=COLOR_CANCEL, hover_color=COLOR_CANCEL_HOVER, command=_remove,
+        ).pack(side="left")
+
+    def _open_containing_folder(self, output_path: str):
+        try:
+            os.startfile(str(Path(output_path).parent))  # Windows only
+        except (AttributeError, OSError):
+            pass
+
     def _check_yt_dlp_update(self):
         """
         Runs on a background thread at startup (never blocks the UI).
@@ -463,6 +581,11 @@ class LoopClipApp(ctk.CTk):
             fg_color="transparent", hover_color=COLOR_PANEL, text_color="gray60",
             command=self._show_about_dialog,
         ).pack(side="right")
+        ctk.CTkButton(
+            header_row, text="Library", width=64, height=22, font=ctk.CTkFont(size=11),
+            fg_color="transparent", hover_color=COLOR_PANEL, text_color="gray60",
+            command=self._show_library_dialog,
+        ).pack(side="right", padx=(0, 6))
 
         ctk.CTkLabel(
             self, text="Paste a YouTube link, set your options, then queue it up.",
@@ -616,6 +739,24 @@ class LoopClipApp(ctk.CTk):
             command=lambda label: self.downsample_var.set(label),
         )
         self.downsample_menu.pack(side="left", padx=(6, 0))
+
+        gpu_row = ctk.CTkFrame(right, fg_color="transparent")
+        gpu_row.pack(fill="x", pady=(6, 0))
+        self.gpu_analysis_var = ctk.BooleanVar(
+            value=self.cfg.get("gpu_analysis", False) and loop_detector.HAS_GPU
+        )
+        self.gpu_analysis_checkbox = ctk.CTkCheckBox(
+            gpu_row, text="GPU-accelerated analysis (experimental)",
+            variable=self.gpu_analysis_var,
+            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
+        )
+        self.gpu_analysis_checkbox.pack(anchor="w")
+        if not loop_detector.HAS_GPU:
+            self.gpu_analysis_checkbox.configure(state="disabled")
+            ctk.CTkLabel(
+                gpu_row, text="No compatible GPU/CuPy install detected - using CPU.",
+                font=ctk.CTkFont(size=10), text_color="gray55",
+            ).pack(anchor="w")
 
         self.limit_search_var = ctk.BooleanVar(value=bool(self.cfg.get("search_stop", "")))
         ctk.CTkCheckBox(
@@ -814,6 +955,11 @@ class LoopClipApp(ctk.CTk):
         self.loop_method_menu.configure(state=state)
         self.similarity_entry.configure(state=state)
         self.downsample_menu.configure(state=state)
+        # GPU analysis only applies during loop detection itself, so it's
+        # tied to the same toggle - but never re-enabled if no GPU/CuPy
+        # was actually detected at startup.
+        if loop_detector.HAS_GPU:
+            self.gpu_analysis_checkbox.configure(state=state)
         self._toggle_search_fields()
 
     def _toggle_search_fields(self):
@@ -980,6 +1126,110 @@ class LoopClipApp(ctk.CTk):
         target.bind("<Button-3>", show_menu)
         target.bind("<Shift-F10>", show_menu)
 
+    # ------------------------------------------------------------- Drag & drop
+
+    def _init_drag_and_drop(self):
+        """
+        Wires up drag-and-drop for the whole window: dropping a YouTube
+        link behaves like the clipboard auto-detect (fills the URL box
+        for review), and dropping one or more local video files queues
+        them directly using whatever options are currently set, bypassing
+        the download step entirely.
+
+        tkinterdnd2 is an optional dependency - if it isn't installed,
+        this silently does nothing rather than failing to start the app.
+        Requires initializing drag-and-drop support on the already-created
+        CTk root via TkinterDnD._require(self); CTk's root can't be
+        created as a TkinterDnD.Tk() subclass directly since CTk.__init__
+        already does its own Tk setup.
+        """
+        if not HAS_DND:
+            return
+        try:
+            TkinterDnD._require(self)
+        except Exception:
+            return  # Best-effort - app works fine without drag-and-drop.
+
+        self.drop_target_register(DND_FILES, DND_TEXT)
+        self.dnd_bind("<<Drop>>", self._on_drop)
+
+        # Also register directly on the URL box's real underlying widget
+        # (same _entry unwrap CTkEntry needs elsewhere in this file) so
+        # dropping precisely onto it works too, not just the window at large.
+        url_target = getattr(self.url_entry, "_entry", self.url_entry)
+        url_target.drop_target_register(DND_FILES, DND_TEXT)
+        url_target.dnd_bind("<<Drop>>", self._on_drop)
+
+    def _on_drop(self, event):
+        """
+        Handles a drop of either a YouTube URL (dragged as text/a link)
+        or one or more local video files (dragged from Explorer).
+
+        Explorer/other apps hand file paths to tkinterdnd2 as a single
+        string, brace-wrapped and space-separated when any path contains
+        spaces, e.g. "{C:/videos/one.mp4} {C:/videos/two.mp4}" - the
+        braces are stripped here rather than just splitting on whitespace,
+        since a plain space-separated split would wrongly break a single
+        path that itself contains a space.
+        """
+        raw = (event.data or "").strip()
+        if not raw:
+            return
+
+        if "{" in raw:
+            paths = re.findall(r"\{([^}]*)\}", raw)
+        else:
+            paths = [raw]
+
+        video_paths = [
+            p for p in paths
+            if Path(p).suffix.lower() in LOCAL_VIDEO_EXTENSIONS and Path(p).is_file()
+        ]
+
+        if video_paths:
+            self._queue_local_files(video_paths)
+            return
+
+        # Not a recognized local video file - treat it as a possible
+        # YouTube link and just fill the URL box, same as clipboard
+        # auto-detect, so the user can still review options before adding it.
+        text = raw.strip("{}")
+        if downloader.is_valid_youtube_url(text) or downloader.is_youtube_collection_url(text):
+            self.url_entry.delete(0, "end")
+            self.url_entry.insert(0, text)
+            self._set_status("URL detected from drop.")
+        else:
+            self._set_status("Dropped item wasn't a recognized video file or YouTube link.")
+
+    def _queue_local_files(self, paths: list):
+        """Adds one or more local video files straight to the queue, using
+        the same current UI settings as a normal Add to Queue click -
+        skips the download step entirely (see QueueItem.is_local_file)."""
+        missing = missing_tools_message()
+        if missing:
+            messagebox.showerror("Missing requirements", missing)
+            return
+
+        output_folder = self.folder_entry.get().strip()
+        try:
+            Path(output_folder).mkdir(parents=True, exist_ok=True)
+        except OSError:
+            messagebox.showerror("Folder Error", "The output folder path is not valid.")
+            return
+
+        if not self._validate_loop_settings():
+            return
+
+        added = 0
+        for path in paths:
+            item = self._build_queue_item(url=path, output_folder=output_folder, is_local_file=True)
+            self.queue_manager.add_item(item)
+            added += 1
+
+        self._remember_output_folder(output_folder)
+        self._save_current_settings(output_folder)
+        self._set_status(f"Added {added} local file(s) to queue ({len(self.queue_manager.items)} total).")
+
     # -------------------------------------------------------------- Logic
 
     def _set_status(self, text: str):
@@ -1026,20 +1276,45 @@ class LoopClipApp(ctk.CTk):
             return False
         return True
 
+    def _build_queue_item(self, url: str, output_folder: str, is_local_file: bool = False) -> QueueItem:
+        """Builds a QueueItem from the current UI option settings for the
+        given url/path - shared by the normal Add to Queue button,
+        drag-and-drop of local files, and expanded playlist/channel URLs,
+        so all three ways of adding an item stay in sync with one
+        definition of "what a queued item looks like right now"."""
+        return QueueItem(
+            url=url,
+            quality=self.quality_var.get(),
+            no_audio=self.no_audio_var.get(),
+            audio_bitrate=self._label_to_bitrate(self.audio_bitrate_var.get()),
+            video_bitrate=self._label_to_video_bitrate(self.video_bitrate_var.get()),
+            auto_loop=self.auto_loop_var.get(),
+            loop_method=self._label_to_loop_method(self.loop_method_var.get()),
+            similarity=_safe_float(self.similarity_entry.get().strip(), 98.0),
+            search_start=(
+                self.search_start_entry.get().strip() if self.limit_search_var.get() else "00:00:00"
+            ),
+            search_stop=(
+                self.search_stop_entry.get().strip() if self.limit_search_var.get() else ""
+            ),
+            downsample=int(self._label_to_downsample(self.downsample_var.get())),
+            min_loop_seconds=None,
+            max_loop_seconds=None,
+            gpu_analysis=self.gpu_analysis_var.get(),
+            output_folder=output_folder,
+            # A local file is the user's own file, not something LoopClip
+            # downloaded - there's no "large original download" to clean
+            # up, so this is forced off regardless of the checkbox, rather
+            # than risking deletion of a file the user never asked to lose.
+            delete_original=(False if is_local_file else self.delete_original_var.get()),
+            seamless_loop=self.seamless_loop_var.get(),
+            crossfade_seconds=self._label_to_crossfade(self.crossfade_var.get()),
+            is_local_file=is_local_file,
+        )
+
     def _on_add_to_queue(self):
         raw = self.url_entry.get().strip()
         if not raw:
-            messagebox.showerror("Invalid URL", "Please enter a valid YouTube URL.")
-            return
-
-        # Supports pasting several URLs at once (space or newline separated -
-        # a single-line entry collapses pasted newlines to spaces anyway, so
-        # splitting on whitespace handles both cases identically).
-        candidates = raw.split()
-        valid_urls = [u for u in candidates if downloader.is_valid_youtube_url(u)]
-        invalid_count = len(candidates) - len(valid_urls)
-
-        if not valid_urls:
             messagebox.showerror("Invalid URL", "Please enter a valid YouTube URL.")
             return
 
@@ -1058,6 +1333,43 @@ class LoopClipApp(ctk.CTk):
         if not self._validate_loop_settings():
             return
 
+        # Supports pasting several URLs at once (space or newline separated -
+        # a single-line entry collapses pasted newlines to spaces anyway, so
+        # splitting on whitespace handles both cases identically).
+        candidates = raw.split()
+        collection_urls = [u for u in candidates if downloader.is_youtube_collection_url(u)]
+        single_candidates = [u for u in candidates if u not in collection_urls]
+        valid_urls = [u for u in single_candidates if downloader.is_valid_youtube_url(u)]
+        invalid_count = len(single_candidates) - len(valid_urls)
+
+        if not valid_urls and not collection_urls:
+            messagebox.showerror("Invalid URL", "Please enter a valid YouTube URL.")
+            return
+
+        self.url_entry.delete(0, "end")
+
+        if valid_urls:
+            self._queue_single_urls(valid_urls, output_folder, invalid_count=invalid_count)
+        elif invalid_count:
+            self._set_status(
+                f"Skipped {invalid_count} invalid entr{'y' if invalid_count == 1 else 'ies'}."
+            )
+
+        if collection_urls:
+            word = "link" if len(collection_urls) == 1 else "links"
+            self._set_status(f"Fetching videos from {len(collection_urls)} playlist/channel {word}...")
+            threading.Thread(
+                target=self._expand_and_queue_collections,
+                args=(collection_urls, output_folder),
+                daemon=True,
+            ).start()
+
+    def _queue_single_urls(self, valid_urls: list, output_folder: str, invalid_count: int = 0):
+        """Adds a list of already-validated single-video URLs to the
+        queue, handling the duplicate-check prompt and settings save -
+        shared by the direct Add to Queue path and by expanded
+        playlist/channel URLs once they've been resolved to individual
+        video links."""
         duplicates = [u for u in valid_urls if self.queue_manager.has_url(u)]
         if duplicates:
             word = "URL is" if len(duplicates) == 1 else "URLs are"
@@ -1069,40 +1381,42 @@ class LoopClipApp(ctk.CTk):
 
         added = 0
         for url in valid_urls:
-            item = QueueItem(
-                url=url,
-                quality=self.quality_var.get(),
-                no_audio=self.no_audio_var.get(),
-                audio_bitrate=self._label_to_bitrate(self.audio_bitrate_var.get()),
-                video_bitrate=self._label_to_video_bitrate(self.video_bitrate_var.get()),
-                auto_loop=self.auto_loop_var.get(),
-                loop_method=self._label_to_loop_method(self.loop_method_var.get()),
-                similarity=_safe_float(self.similarity_entry.get().strip(), 98.0),
-                search_start=(
-                    self.search_start_entry.get().strip() if self.limit_search_var.get() else "00:00:00"
-                ),
-                search_stop=(
-                    self.search_stop_entry.get().strip() if self.limit_search_var.get() else ""
-                ),
-                downsample=int(self._label_to_downsample(self.downsample_var.get())),
-                min_loop_seconds=None,
-                max_loop_seconds=None,
-                output_folder=output_folder,
-                delete_original=self.delete_original_var.get(),
-                seamless_loop=self.seamless_loop_var.get(),
-                crossfade_seconds=self._label_to_crossfade(self.crossfade_var.get()),
-            )
+            item = self._build_queue_item(url=url, output_folder=output_folder)
             self.queue_manager.add_item(item)
             added += 1
 
         self._remember_output_folder(output_folder)
         self._save_current_settings(output_folder)
 
-        self.url_entry.delete(0, "end")
         status = f"Added {added} item(s) to queue ({len(self.queue_manager.items)} total)."
         if invalid_count:
             status += f" Skipped {invalid_count} invalid entr{'y' if invalid_count == 1 else 'ies'}."
         self._set_status(status)
+
+    def _expand_and_queue_collections(self, collection_urls: list, output_folder: str):
+        """
+        Runs on a background thread: resolves each playlist/channel URL
+        into its individual video URLs (a network call, so it must not
+        block the UI thread), then hops back to the main thread to
+        actually queue them. Errors from one bad link (private/removed
+        playlist, etc.) don't stop the others from still being expanded.
+        """
+        expanded = []
+        errors = []
+        for url in collection_urls:
+            try:
+                expanded.extend(downloader.expand_collection_urls(url))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(str(exc))
+        self.after(0, lambda: self._on_collections_expanded(expanded, errors, output_folder))
+
+    def _on_collections_expanded(self, expanded: list, errors: list, output_folder: str):
+        if errors:
+            messagebox.showerror("Playlist/Channel Error", "\n\n".join(errors))
+        if expanded:
+            self._queue_single_urls(expanded, output_folder)
+        elif not errors:
+            self._set_status("No videos found at that playlist/channel link.")
 
     def _on_start_queue_clicked(self):
         if not any(i.state == QueueState.QUEUED for i in self.queue_manager.items):
@@ -1165,6 +1479,7 @@ class LoopClipApp(ctk.CTk):
                 self.search_stop_entry.get().strip() if self.limit_search_var.get() else ""
             ),
             "downsample": int(self._label_to_downsample(self.downsample_var.get())),
+            "gpu_analysis": self.gpu_analysis_var.get(),
             "delete_original": self.delete_original_var.get(),
             "open_folder_when_finished": self.open_folder_var.get(),
             "seamless_loop": self.seamless_loop_var.get(),

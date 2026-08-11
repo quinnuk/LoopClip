@@ -33,6 +33,7 @@ DEFAULTS = {
     "downsample": 1,             # analyze every Nth frame
     "min_loop_seconds": "",      # "" = auto
     "max_loop_seconds": "",      # "" = auto
+    "gpu_analysis": False,       # optional CuPy-accelerated loop analysis - see loop_detector.py
 
     "delete_original": True,
     "open_folder_when_finished": True,

@@ -29,6 +29,23 @@ YOUTUBE_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Playlist and channel URLs - a distinct shape from a single-video URL
+# above. These need to be *expanded* into individual video URLs (via
+# expand_collection_urls below) before they can be queued, rather than
+# downloaded directly.
+YOUTUBE_COLLECTION_RE = re.compile(
+    r"^(https?://)?(www\.|m\.)?youtube\.com/"
+    r"(playlist\?(?:.*&)?list=[\w\-]+"
+    r"|channel/[\w\-]+"
+    r"|@[\w\-.]+"
+    r"|c/[\w\-]+"
+    r"|user/[\w\-]+)",
+    re.IGNORECASE,
+)
+# A plain video URL can also carry a &list= param (e.g. a video opened
+# from within a playlist) - that's still a single video, not a collection,
+# so it's deliberately excluded from YOUTUBE_COLLECTION_RE above.
+
 
 class CancelledError(Exception):
     """Raised when a download is aborted because the user pressed Cancel."""
@@ -39,6 +56,72 @@ def is_valid_youtube_url(url: str) -> bool:
     if not url:
         return False
     return bool(YOUTUBE_URL_RE.match(url.strip()))
+
+
+def is_youtube_collection_url(url: str) -> bool:
+    """Whether `url` looks like a playlist or channel link (something that
+    expands into many videos) rather than a single video."""
+    if not url:
+        return False
+    return bool(YOUTUBE_COLLECTION_RE.match(url.strip()))
+
+
+def expand_collection_urls(
+    url: str,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+) -> list:
+    """
+    Given a playlist or channel URL, returns a list of individual video
+    URLs it contains, without downloading any of them.
+
+    Uses yt-dlp's "flat" extraction mode (extract_flat="in_playlist"),
+    which just lists each entry's id/title rather than resolving full
+    format info for every video - this is what keeps expanding even a
+    large channel reasonably fast, since it's a metadata listing, not a
+    per-video lookup.
+
+    progress_callback, if given, is called as (count_so_far, 0) as
+    entries are discovered - the total isn't known ahead of time for a
+    channel, so the second argument is always 0 (caller should treat this
+    as "still discovering" rather than a real fraction).
+    """
+    ydl_opts = {
+        "extract_flat": "in_playlist",
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"Could not read this playlist/channel: {exc}"
+        ) from exc
+
+    entries = info.get("entries") or []
+    urls = []
+    for entry in entries:
+        if not entry:
+            continue
+        # Flat extraction gives back either a full "url" already, or just
+        # an "id" to build one from - handle both, preferring whichever
+        # is actually present.
+        video_url = entry.get("url")
+        if not video_url and entry.get("id"):
+            video_url = f"https://www.youtube.com/watch?v={entry['id']}"
+        if video_url and is_valid_youtube_url(video_url):
+            urls.append(video_url)
+            if progress_callback is not None:
+                progress_callback(len(urls), 0)
+
+    if not urls:
+        raise RuntimeError(
+            "No videos were found at this playlist/channel link "
+            "(it may be empty, private, or the link may be wrong)."
+        )
+    return urls
 
 
 # Format strings per quality mode, with and without an audio stream.

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import downloader
+import library
 import loop_detector
 import processor
 
@@ -61,11 +62,22 @@ class QueueItem:
     downsample: int             # analyze every Nth frame
     min_loop_seconds: Optional[float]  # None = auto
     max_loop_seconds: Optional[float]  # None = auto
+    # Enables an optional GPU-accelerated path for part of loop analysis,
+    # when a compatible GPU/CuPy install is available (see loop_detector's
+    # module docstring for exactly what this does and doesn't speed up).
+    # Silently has no effect if the GPU path isn't available - always
+    # falls back to the existing CPU analysis.
+    gpu_analysis: bool
 
     output_folder: str
     delete_original: bool
     seamless_loop: bool
     crossfade_seconds: str
+
+    # True when `url` is actually a path to a local video file dropped or
+    # otherwise added directly, rather than something to download via
+    # yt-dlp. Set by the caller (main.py) at creation time.
+    is_local_file: bool = False
 
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     state: str = QueueState.QUEUED
@@ -384,14 +396,31 @@ class QueueManager:
             # timeline - when a stop time was actually given. An
             # open-ended stop means the whole video is downloaded from
             # 0:00, so the timeline offset stays 0 in that case.
-            if search_stop_s is not None:
+            # Local files are used in full, start to finish - there's no
+            # download to section-cut, so the timeline is never re-based
+            # (search_offset stays 0) the way a downloaded section would.
+            if search_stop_s is not None and not item.is_local_file:
                 pad_seconds = 30
                 section_start = max(0, search_start_s - pad_seconds)
                 section_end = search_stop_s + pad_seconds
                 section_range = (section_start, section_end)
                 search_offset = section_start
 
-            if item.cached_source_path and Path(item.cached_source_path).exists():
+            if item.is_local_file:
+                # Nothing to download - the "source" is already the local
+                # file the user dropped/selected. Still goes through the
+                # same analysis/trim/loop pipeline below as a downloaded
+                # video would.
+                if not Path(item.url).exists():
+                    raise RuntimeError(f"Local file no longer exists: {item.url}")
+                item.state = QueueState.DOWNLOADING  # reuses existing state/UI, just skipped fast
+                item.operation = "Using local file..."
+                item.percent = 100.0
+                self._notify()
+                result = _CachedDownloadResult(
+                    filepath=item.url, title=Path(item.url).stem,
+                )
+            elif item.cached_source_path and Path(item.cached_source_path).exists():
                 # A previous attempt on this item downloaded successfully
                 # but failed at a later stage (analysis/trim/loop) - reuse
                 # that file instead of downloading the same video again.
@@ -455,6 +484,7 @@ class QueueManager:
                         max_loop_seconds=item.max_loop_seconds,
                         downsample=item.downsample,
                         progress_callback=on_analysis_progress,
+                        gpu=item.gpu_analysis,
                     )
                 except loop_detector.LoopDetectionError as exc:
                     raise RuntimeError(str(exc)) from exc
@@ -566,6 +596,19 @@ class QueueManager:
             # Job's done - drop any cached source now, rather than leaving
             # it on disk indefinitely.
             self._clear_cached_source(item)
+            # Record this finished video in the persistent library so it
+            # still shows up there after the queue itself is cleared or
+            # the app is restarted. Best-effort - a library write failure
+            # should never turn an otherwise-successful job into an error.
+            try:
+                library.add_entry(
+                    title=item.title or Path(out_path).stem,
+                    output_path=out_path,
+                    source_url=item.url,
+                    warning=item.warning_message,
+                )
+            except Exception:
+                pass
 
         except (downloader.CancelledError, processor.CancelledError):
             self._mark_cancelled(item, temp_dir, out_path)
