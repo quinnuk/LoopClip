@@ -134,3 +134,84 @@ else:
         f"Widget updated unsafely from a background thread:\n{result.stdout}\n{result.stderr}"
     )
     assert "OK" in result.stdout, f"Test script didn't complete normally:\n{result.stdout}\n{result.stderr}"
+
+
+@requires_display
+def test_about_dialog_close_button_never_clipped():
+    """
+    Regression test for a real bug reported from an actual Windows run:
+    the dialog originally had a hardcoded geometry("420x340"). On that
+    machine's font rendering/DPI scaling, the real content (in
+    particular the NVENC status line, a full sentence like "Not
+    available (no compatible NVIDIA GPU/driver detected) - using CPU
+    encoding") needed more vertical space than 340px allowed, clipping
+    the Close button at the bottom edge of the dialog - and the
+    side-by-side label/value row layout also let a long value overlap
+    the label text instead of wrapping.
+
+    Fixed by: stacking label above value (with wraplength) per row
+    instead of packing them side-by-side, and letting the dialog
+    auto-size to its actual rendered content instead of a guessed fixed
+    height - including re-measuring after the async NVENC status arrives
+    and replaces the "Checking..." placeholder, since that can be
+    considerably longer and push the layout onto an extra line.
+
+    This asserts the Close button's bottom edge never exceeds the
+    dialog's actual height, both immediately on open and after the real
+    (not placeholder) NVENC status has been applied.
+    """
+    import subprocess
+    script = '''
+import sys, threading, time
+sys.path.insert(0, ".")
+import main
+import tkinter as tk
+
+app = main.LoopClipApp()
+app._show_about_dialog()
+
+dialog = None
+for w in app.winfo_children():
+    if isinstance(w, tk.Toplevel):
+        dialog = w
+        break
+
+def find_close_button(widget):
+    for child in widget.winfo_children():
+        try:
+            if child.cget("text") == "Close":
+                return child
+        except Exception:
+            pass
+        found = find_close_button(child)
+        if found:
+            return found
+    return None
+
+def check_and_quit():
+    time.sleep(2.0)  # let the real (non-placeholder) NVENC status land
+    btn = find_close_button(dialog)
+    btn_bottom = btn.winfo_y() + btn.winfo_height()
+    dialog_height = dialog.winfo_height()
+    nvenc_text = app._about_nvenc_label.cget("text")
+    print(f"RESULT:{btn_bottom}:{dialog_height}:{nvenc_text!r}")
+    app.quit()
+
+threading.Thread(target=check_and_quit, daemon=True).start()
+app.mainloop()
+'''
+    result = subprocess.run(
+        _wrap_for_display([sys.executable, "-c", script]),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        cwd=str(Path(__file__).resolve().parent.parent), timeout=30,
+    )
+    line = next((l for l in result.stdout.splitlines() if l.startswith("RESULT:")), None)
+    assert line is not None, f"Test script didn't complete normally:\n{result.stdout}\n{result.stderr}"
+
+    _, btn_bottom, dialog_height, nvenc_text = line.split(":", 3)
+    btn_bottom, dialog_height = int(btn_bottom), int(dialog_height)
+    assert btn_bottom <= dialog_height, (
+        f"Close button (bottom={btn_bottom}) is clipped by the dialog "
+        f"(height={dialog_height}) - NVENC text was: {nvenc_text}"
+    )
+    assert nvenc_text != "'Checking...'", "NVENC status never finished updating"
