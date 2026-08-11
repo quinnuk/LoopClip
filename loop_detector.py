@@ -192,12 +192,43 @@ def _hash_similarity_matrix(frames_a: List[_Frame], frames_b: List[_Frame]) -> n
 
 
 def _histogram_similarity(a: _Frame, b: _Frame) -> float:
-    hist_a = cv2.calcHist([a.small], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
-    hist_b = cv2.calcHist([b.small], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
-    cv2.normalize(hist_a, hist_a)
-    cv2.normalize(hist_b, hist_b)
-    correlation = cv2.compareHist(hist_a, hist_b, cv2.HISTCMP_CORREL)
-    return max(0.0, min(1.0, (correlation + 1) / 2))  # [-1, 1] -> [0, 1]
+    """
+    Color/lighting similarity via per-channel (B, G, R) 1D histogram
+    correlation, averaged across the three channels.
+
+    Deliberately NOT a single joint 3D (8x8x8) histogram compared with one
+    cv2.compareHist(..., HISTCMP_CORREL) call, despite that being the more
+    common-looking OpenCV snippet: on at least one real OpenCV build
+    (4.13.0), HISTCMP_CORREL on a 3D-shaped histogram Mat can return
+    wildly wrong results - including -1.0 ("completely different") - for
+    a pair of bit-for-bit IDENTICAL frames, when the underlying histogram
+    is high-entropy (many bins with small, similarly-sized counts). This
+    was verified directly: normalizing two identical 3D histograms
+    produces two bit-identical float32 arrays, numpy's own Pearson
+    correlation on them correctly returns 1.0, but cv2.compareHist on the
+    same arrays returns -1.0 - a bug in how that build handles
+    multi-dimensional Mats, not a property of the data. Typical
+    real-world footage (solid colors, gradients, most photos) rarely
+    triggers it, but exactly the content this app targets - aquarium
+    caustics, water sparkle, fire, film grain - can plausibly produce
+    that kind of dense, high-entropy color distribution, which would
+    silently make LoopClip think two identical-looking frames don't
+    match at all.
+
+    Three independent 1D per-channel histograms sidesteps the
+    multi-dimensional Mat issue entirely (HISTCMP_CORREL is reliable on
+    1D/2D histograms), and correlates just as well with perceived
+    color/lighting similarity for this purpose.
+    """
+    total = 0.0
+    for channel in range(3):
+        hist_a = cv2.calcHist([a.small], [channel], None, [32], [0, 256])
+        hist_b = cv2.calcHist([b.small], [channel], None, [32], [0, 256])
+        cv2.normalize(hist_a, hist_a)
+        cv2.normalize(hist_b, hist_b)
+        correlation = cv2.compareHist(hist_a, hist_b, cv2.HISTCMP_CORREL)
+        total += max(0.0, min(1.0, (correlation + 1) / 2))  # [-1, 1] -> [0, 1]
+    return total / 3.0
 
 
 def _ssim_similarity(a: _Frame, b: _Frame) -> float:

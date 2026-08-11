@@ -15,7 +15,7 @@ Examples
   python cli.py input.mp4 output.mp4
 
   # From a YouTube URL, custom similarity/method
-  python cli.py https://youtu.be/XXXXXXXXXXX output.mp4 --similarity 95 --method hybrid_off_ssim
+  python cli.py https://youtu.be/XXXXXXXXXXX output.mp4 --similarity 95 --method combined
 
   # Only analyze a specific window of a long video
   python cli.py input.mp4 output.mp4 --start 00:00:30 --stop 00:05:00 --downsample 4
@@ -29,10 +29,12 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 import downloader
 import loop_detector
 import processor
+from version import __version__
 
 
 def _print_progress(phase: str, done: int, total: int):
@@ -50,6 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("input", help="YouTube URL or path to a local video file")
     parser.add_argument("output", help="Path for the output video file")
+    parser.add_argument(
+        "--version", action="version", version=f"LoopClip {__version__}",
+    )
 
     parser.add_argument("--start", default="00:00:00", help="Start of the search window (HH:MM:SS)")
     parser.add_argument("--stop", default=None, help="End of the search window (HH:MM:SS); default: end of video")
@@ -70,7 +75,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--no-auto-loop", action="store_true",
-        help="Skip loop detection entirely - just download/re-encode the source as-is",
+        help=(
+            "Skip loop detection - the full source is still downloaded/processed "
+            "through the normal pipeline (honouring --quality, --video-bitrate, "
+            "--audio-bitrate, --no-audio and GPU/NVENC settings), just without "
+            "trimming to a detected loop point."
+        ),
     )
     parser.add_argument(
         "--crossfade", type=float, default=None,
@@ -89,8 +99,92 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def validate_args(args) -> Optional[str]:
+    """
+    Validates parsed CLI arguments beyond what argparse's `type=`/`choices=`
+    already enforce, returning a human-readable error message (or None if
+    everything checks out). Kept as a separate, pure function - takes an
+    argparse Namespace, returns str|None - so it can be unit-tested without
+    needing to invoke main() or touch the filesystem/network.
+    """
+    if not (0 <= args.similarity <= 100):
+        return f"--similarity must be between 0 and 100 (got {args.similarity})."
+
+    if args.downsample < 1:
+        return f"--downsample must be a positive integer (got {args.downsample})."
+
+    if not processor.validate_hms(args.start):
+        return f"--start must be in HH:MM:SS format (got '{args.start}')."
+
+    start_seconds = processor.hms_to_seconds(args.start)
+    stop_seconds = None
+    if args.stop is not None:
+        if not processor.validate_hms(args.stop):
+            return f"--stop must be in HH:MM:SS format (got '{args.stop}')."
+        stop_seconds = processor.hms_to_seconds(args.stop)
+        if stop_seconds <= start_seconds:
+            return (
+                f"--stop ({args.stop}) must be later than --start ({args.start})."
+            )
+
+    if args.min_length is not None and args.min_length <= 0:
+        return f"--min-length must be a positive number of seconds (got {args.min_length})."
+
+    if args.max_length is not None and args.max_length <= 0:
+        return f"--max-length must be a positive number of seconds (got {args.max_length})."
+
+    if (
+        args.min_length is not None
+        and args.max_length is not None
+        and args.min_length >= args.max_length
+    ):
+        return (
+            f"--min-length ({args.min_length}) must be smaller than "
+            f"--max-length ({args.max_length})."
+        )
+
+    if args.crossfade is not None:
+        if args.crossfade <= 0:
+            return f"--crossfade must be a positive number of seconds (got {args.crossfade})."
+        # Loop duration isn't known until after detection runs (or, with
+        # --no-auto-loop, until the source's own length is probed), so a
+        # tight upper-bound check happens later in apply_seamless_loop
+        # itself, which already falls back to a plain trimmed copy with a
+        # clear warning if the crossfade turns out to be too long for the
+        # actual clip.
+
+    try:
+        video_bitrate_val = int(args.video_bitrate)
+    except (TypeError, ValueError):
+        return f"--video-bitrate must be a whole number of Mbps (got '{args.video_bitrate}')."
+    if video_bitrate_val <= 0:
+        return f"--video-bitrate must be a positive number of Mbps (got {args.video_bitrate})."
+
+    if args.audio_bitrate != "original":
+        try:
+            audio_bitrate_val = int(args.audio_bitrate)
+        except (TypeError, ValueError):
+            return (
+                "--audio-bitrate must be 'original' or a whole number of kbps "
+                f"(got '{args.audio_bitrate}')."
+            )
+        if audio_bitrate_val <= 0:
+            return f"--audio-bitrate must be a positive number of kbps (got {args.audio_bitrate})."
+
+    output_parent = Path(args.output).parent
+    if output_parent != Path("") and output_parent.exists() and not output_parent.is_dir():
+        return f"--output's parent path exists but is not a directory: {output_parent}"
+
+    return None
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+
+    error = validate_args(args)
+    if error is not None:
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
 
     print("LoopClip CLI")
     print("=" * 40)
@@ -122,46 +216,53 @@ def main(argv=None) -> int:
             title = Path(source_path).stem
 
         if args.no_auto_loop:
-            print("\n--no-auto-loop set - skipping loop detection.")
-            Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_path, args.output)
-            print(f"\n\u2713 Saved: {args.output}")
-            return 0
-
-        stop_seconds = processor.hms_to_seconds(args.stop) if args.stop else None
-        start_seconds = processor.hms_to_seconds(args.start)
-
-        print(f"\nAnalyzing for a seamless loop (method={args.method}, similarity={args.similarity}%)...")
-        try:
-            best = loop_detector.find_best_loop(
-                source_path, start=start_seconds, stop=stop_seconds,
-                method=args.method, similarity_threshold=args.similarity,
-                min_loop_seconds=args.min_length, max_loop_seconds=args.max_length,
-                downsample=args.downsample,
-                progress_callback=_print_progress if args.verbose else None,
+            print("\n--no-auto-loop set - skipping loop detection; processing the full source instead.")
+            print("\nEncoding output...")
+            processor.process_video(
+                input_path=source_path,
+                output_path=args.output,
+                trim_enabled=False,
+                start_hms="00:00:00.000",
+                duration_hms="00:00:00.000",
+                audio_bitrate=args.audio_bitrate,
+                video_bitrate=args.video_bitrate,
+                no_audio=args.no_audio,
             )
-        except loop_detector.LoopDetectionError as exc:
-            print(f"\nError: {exc}", file=sys.stderr)
-            return 1
+        else:
+            stop_seconds = processor.hms_to_seconds(args.stop) if args.stop else None
+            start_seconds = processor.hms_to_seconds(args.start)
 
-        print(
-            f"\nFound loop:\n"
-            f"  Time: {best.start:.2f}s - {best.end:.2f}s\n"
-            f"  Duration: {best.duration:.2f}s\n"
-            f"  Similarity: {best.similarity:.3f}   Quality: {best.quality:.3f}   Score: {best.score:.3f}"
-        )
+            print(f"\nAnalyzing for a seamless loop (method={args.method}, similarity={args.similarity}%)...")
+            try:
+                best = loop_detector.find_best_loop(
+                    source_path, start=start_seconds, stop=stop_seconds,
+                    method=args.method, similarity_threshold=args.similarity,
+                    min_loop_seconds=args.min_length, max_loop_seconds=args.max_length,
+                    downsample=args.downsample,
+                    progress_callback=_print_progress if args.verbose else None,
+                )
+            except loop_detector.LoopDetectionError as exc:
+                print(f"\nError: {exc}", file=sys.stderr)
+                return 1
 
-        print("\nEncoding output...")
-        processor.process_video(
-            input_path=source_path,
-            output_path=args.output,
-            trim_enabled=True,
-            start_hms=processor.seconds_to_ffmpeg_time(best.start),
-            duration_hms=processor.seconds_to_ffmpeg_time(best.duration),
-            audio_bitrate=args.audio_bitrate,
-            video_bitrate=args.video_bitrate,
-            no_audio=args.no_audio,
-        )
+            print(
+                f"\nFound loop:\n"
+                f"  Time: {best.start:.2f}s - {best.end:.2f}s\n"
+                f"  Duration: {best.duration:.2f}s\n"
+                f"  Similarity: {best.similarity:.3f}   Quality: {best.quality:.3f}   Score: {best.score:.3f}"
+            )
+
+            print("\nEncoding output...")
+            processor.process_video(
+                input_path=source_path,
+                output_path=args.output,
+                trim_enabled=True,
+                start_hms=processor.seconds_to_ffmpeg_time(best.start),
+                duration_hms=processor.seconds_to_ffmpeg_time(best.duration),
+                audio_bitrate=args.audio_bitrate,
+                video_bitrate=args.video_bitrate,
+                no_audio=args.no_audio,
+            )
 
         if args.crossfade:
             print(f"Applying {args.crossfade}s seamless-loop crossfade...")
@@ -173,8 +274,38 @@ def main(argv=None) -> int:
             )
             shutil.move(crossfaded, args.output)
 
-        print(f"\n\u2713 Successfully created looped video: {args.output}")
+        try:
+            processor.verify_output(args.output, expect_audio=not args.no_audio)
+        except processor.OutputValidationError as exc:
+            print(f"\nError: FFmpeg reported success, but the output file failed validation: {exc}", file=sys.stderr)
+            return 1
+
+        verb = "processed" if args.no_auto_loop else "created looped"
+        print(f"\n\u2713 Successfully {verb} video: {args.output}")
         return 0
+    except KeyboardInterrupt:
+        print("\n\nCancelled.", file=sys.stderr)
+        return 130  # conventional shell exit code for Ctrl+C / SIGINT
+    except (downloader.CancelledError, processor.CancelledError):
+        print("\n\nCancelled.", file=sys.stderr)
+        return 130
+    except RuntimeError as exc:
+        # downloader.py and processor.py both normalize their real
+        # failures (yt-dlp errors, FFmpeg failures) into RuntimeError
+        # with an already human-readable message - printing it directly
+        # here (instead of letting it propagate as an unhandled
+        # exception) is the difference between a normal user seeing a
+        # clear "Error: ..." line versus a raw Python traceback.
+        print(f"\nError: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - last-resort net for genuinely unexpected bugs
+        print(
+            f"\nUnexpected error: {exc}\n"
+            "This may be a bug - if it keeps happening, please open an issue "
+            "at https://github.com/quinnuk/LoopClip/issues",
+            file=sys.stderr,
+        )
+        return 1
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 

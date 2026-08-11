@@ -15,10 +15,12 @@ two-column options layout with a segmented quality selector):
 
 import json
 import os
+import platform
 import tempfile
 import threading
 import time
 import urllib.request
+import webbrowser
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -28,7 +30,8 @@ import customtkinter as ctk
 import processor
 import settings as settings_module
 from queue_manager import QueueItem, QueueManager, QueueState
-from tool_check import missing_tools_message
+from tool_check import check_ffmpeg, check_nvenc, get_ffmpeg_version, missing_tools_message
+from version import __version__
 
 try:
     import pyperclip
@@ -57,6 +60,25 @@ COLOR_CANCEL_HOVER = "#6E2323"
 TEMP_ROOT = Path(tempfile.gettempdir()) / "LoopClip" / "Temp"
 
 CLIPBOARD_POLL_MS = 150  # near-instant clipboard pickup
+
+
+def _safe_float(text: str, default: float) -> float:
+    """
+    Parses `text` as a float, falling back to `default` instead of raising
+    if it isn't a valid number.
+
+    Used for fields whose value only matters when a related option is
+    enabled (e.g. the similarity box when auto-loop detection is off) -
+    _validate_loop_settings() already blocks "Add to Queue" with a clear
+    message when that field's value *does* matter and is invalid, but
+    when it doesn't matter, silently falling back here (rather than still
+    hard-parsing it) avoids the field crashing item creation over a value
+    the user isn't even using.
+    """
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return default
 
 STATE_COLORS = {
     QueueState.QUEUED: "#9AA0A6",
@@ -217,7 +239,7 @@ class LoopClipApp(ctk.CTk):
         super().__init__()
         self.configure(fg_color=COLOR_BG)
 
-        self.title("LoopClip")
+        self.title(f"LoopClip {__version__}")
         self.geometry("700x820")
         self.minsize(640, 700)
         self.resizable(True, True)
@@ -248,6 +270,142 @@ class LoopClipApp(ctk.CTk):
                 self.iconbitmap(str(icon_path))
             except tk.TclError:
                 pass
+
+    def _show_about_dialog(self):
+        """
+        Shows version/environment diagnostics: LoopClip version, Python
+        runtime, FFmpeg availability, yt-dlp version, NVENC status, and a
+        link to the GitHub project. Meant to make troubleshooting
+        ("what version are you on? Is FFmpeg actually found? Is NVENC
+        working?") a lot easier than asking the user to dig through logs
+        or run commands manually.
+
+        The NVENC check involves a real (tiny, ~0.1s) test encode, so
+        it's run on a background thread and the dialog fills in that one
+        row once it completes, rather than blocking the whole dialog from
+        opening.
+        """
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("About LoopClip")
+        dialog.resizable(False, False)
+        dialog.configure(fg_color=COLOR_BG)
+        dialog.transient(self)
+        dialog.grab_set()
+        # Deliberately NOT calling dialog.geometry("WIDTHxHEIGHT") with a
+        # hardcoded pixel size here: a fixed height picked against one
+        # machine's font rendering/DPI scaling can end up too short on a
+        # different one, clipping the bottom of the dialog (confirmed
+        # directly - this happened on a real Windows machine with the
+        # Close button cut off). Leaving geometry unset lets Tk size the
+        # window to whatever its packed content actually needs once
+        # rendered, which adapts correctly regardless of font metrics or
+        # display scaling.
+        dialog_width = 420
+
+        ctk.CTkLabel(
+            dialog, text=f"LoopClip {__version__}",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).pack(pady=(20, 4))
+        ctk.CTkLabel(
+            dialog, text="Seamless-loop 4K clips from YouTube videos.",
+            font=ctk.CTkFont(size=11), text_color="gray60",
+        ).pack(pady=(0, 16))
+
+        info_frame = ctk.CTkFrame(dialog, fg_color=COLOR_PANEL)
+        info_frame.pack(fill="x", padx=20)
+
+        ffmpeg_version = get_ffmpeg_version()
+        ffmpeg_text = f"Found (v{ffmpeg_version})" if ffmpeg_version else \
+            ("Found" if check_ffmpeg() else "Not found")
+        try:
+            ytdlp_version = downloader.get_installed_version()
+        except Exception:
+            ytdlp_version = "unknown"
+
+        rows = [
+            ("Python", platform.python_version()),
+            ("FFmpeg", ffmpeg_text),
+            ("yt-dlp", ytdlp_version),
+            ("NVENC (GPU encoding)", "Checking..."),
+        ]
+        self._about_nvenc_label = None
+        for label, value in rows:
+            row = ctk.CTkFrame(info_frame, fg_color="transparent")
+            row.pack(fill="x", padx=12, pady=6)
+            # Label above value (not side-by-side) so a long value - the
+            # NVENC status in particular can be a full sentence, e.g.
+            # "Not available (no compatible NVIDIA GPU/driver detected) -
+            # using CPU encoding" - has room to wrap onto multiple lines
+            # instead of overlapping the label. Confirmed directly: the
+            # previous side-by-side layout visibly collided the label and
+            # value text together on a real machine once the value was
+            # longer than a couple of words.
+            ctk.CTkLabel(
+                row, text=label, anchor="w", text_color="gray70",
+                font=ctk.CTkFont(size=11),
+            ).pack(fill="x")
+            value_label = ctk.CTkLabel(
+                row, text=value, anchor="w", justify="left",
+                wraplength=dialog_width - 64,
+            )
+            value_label.pack(fill="x")
+            if label.startswith("NVENC"):
+                self._about_nvenc_label = value_label
+
+        def _update_nvenc_status():
+            # Runs on a background thread (the NVENC check does a real,
+            # if tiny, subprocess encode) - Tkinter widgets can only be
+            # safely touched from the main thread, so the actual UI
+            # update is handed to self.after(0, ...) rather than calling
+            # .configure() here directly (which intermittently raises
+            # "main thread is not in main loop", confirmed by actually
+            # running this against a live Tk app rather than assuming
+            # the same pattern used elsewhere in this file would apply).
+            available, message = check_nvenc()
+            color = "#3FB950" if available else "gray70"
+
+            def _apply():
+                # Dialog may already be closed by the time this runs -
+                # guard against updating a destroyed widget.
+                try:
+                    self._about_nvenc_label.configure(text=message, text_color=color)
+                    # The real NVENC message can be noticeably longer
+                    # than the "Checking..." placeholder the dialog was
+                    # originally sized against, and wraplength may now
+                    # push this row onto two lines instead of one -
+                    # re-measure and re-apply the dialog's height so that
+                    # doesn't get clipped at the bottom the same way the
+                    # original fixed-size dialog did.
+                    dialog.update_idletasks()
+                    dialog.geometry(f"{dialog_width}x{dialog.winfo_reqheight()}")
+                except tk.TclError:
+                    pass
+
+            self.after(0, _apply)
+
+        threading.Thread(target=_update_nvenc_status, daemon=True).start()
+
+        link_label = ctk.CTkLabel(
+            dialog, text="github.com/quinnuk/LoopClip", text_color=COLOR_ACCENT,
+            cursor="hand2", font=ctk.CTkFont(size=12, underline=True),
+        )
+        link_label.pack(pady=(16, 4))
+        link_label.bind(
+            "<Button-1>",
+            lambda _e: webbrowser.open("https://github.com/quinnuk/LoopClip"),
+        )
+
+        ctk.CTkButton(
+            dialog, text="Close", width=100, fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOVER, command=dialog.destroy,
+        ).pack(pady=(12, 20))
+
+        # Force layout now (rather than waiting for the next idle cycle)
+        # so the width constraint below applies to the dialog's actual
+        # first paint, not a stale/zero size.
+        dialog.update_idletasks()
+        dialog.geometry(f"{dialog_width}x{dialog.winfo_reqheight()}")
+        dialog.minsize(dialog_width, dialog.winfo_reqheight())
 
     def _check_yt_dlp_update(self):
         """
@@ -296,11 +454,20 @@ class LoopClipApp(ctk.CTk):
     def _build_ui(self):
         pad_x = 20
 
-        # Subtitle only - no big title label, per user preference.
+        # Subtitle, with a small unobtrusive "About" link in the top-right
+        # corner - no full menu bar needed for a single dialog like this.
+        header_row = ctk.CTkFrame(self, fg_color="transparent")
+        header_row.pack(fill="x", padx=pad_x, pady=(10, 0))
+        ctk.CTkButton(
+            header_row, text="About", width=56, height=22, font=ctk.CTkFont(size=11),
+            fg_color="transparent", hover_color=COLOR_PANEL, text_color="gray60",
+            command=self._show_about_dialog,
+        ).pack(side="right")
+
         ctk.CTkLabel(
             self, text="Paste a YouTube link, set your options, then queue it up.",
             font=ctk.CTkFont(size=11), text_color="gray60",
-        ).pack(pady=(16, 12))
+        ).pack(pady=(2, 12))
 
         # URL
         ctk.CTkLabel(self, text="YouTube Video URL", anchor="w").pack(fill="x", padx=pad_x)
@@ -910,7 +1077,7 @@ class LoopClipApp(ctk.CTk):
                 video_bitrate=self._label_to_video_bitrate(self.video_bitrate_var.get()),
                 auto_loop=self.auto_loop_var.get(),
                 loop_method=self._label_to_loop_method(self.loop_method_var.get()),
-                similarity=float(self.similarity_entry.get().strip() or 98),
+                similarity=_safe_float(self.similarity_entry.get().strip(), 98.0),
                 search_start=(
                     self.search_start_entry.get().strip() if self.limit_search_var.get() else "00:00:00"
                 ),
@@ -990,7 +1157,7 @@ class LoopClipApp(ctk.CTk):
             "video_bitrate": self._label_to_video_bitrate(self.video_bitrate_var.get()),
             "auto_loop": self.auto_loop_var.get(),
             "loop_method": self._label_to_loop_method(self.loop_method_var.get()),
-            "similarity": float(self.similarity_entry.get().strip() or 98),
+            "similarity": _safe_float(self.similarity_entry.get().strip(), 98.0),
             "search_start": (
                 self.search_start_entry.get().strip() if self.limit_search_var.get() else "00:00:00"
             ),

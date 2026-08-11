@@ -22,6 +22,13 @@ _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 AUDIO_BITRATES = ["original", "128", "192", "256", "320"]
 
+# Re-encode fallback paths cap resolution at this width (LoopClip's stated
+# target is 4K UHD screensaver/live-wallpaper output) but never *upscale*
+# a smaller source up to it - that just inflates file size/encode time for
+# no real quality gain. A single named constant here means raising the
+# cap later (e.g. for 8K sources) is a one-line change.
+MAX_OUTPUT_WIDTH = 3840
+
 
 class CancelledError(Exception):
     """Raised when an FFmpeg operation is aborted because of a user Cancel."""
@@ -77,9 +84,79 @@ def seconds_to_ffmpeg_time(total_seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
 
+_WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+# Leaves headroom for the " - Nmin loop.mp4" suffix this app appends, plus
+# whatever destination folder path it ends up under - long YouTube titles
+# (some run past 100 characters) could otherwise combine with a deep
+# output folder to exceed Windows' historical 260-character MAX_PATH.
+_MAX_SANITIZED_TITLE_LENGTH = 150
+
+
 def sanitize_title(title: str) -> str:
-    """Removes characters that are illegal in Windows filenames."""
-    return re.sub(r'[\\/:*?"<>|]', "", title).strip()
+    """
+    Makes a string safe to use as (part of) a Windows filename.
+
+    Handles more than just the characters Windows forbids outright
+    (\\/:*?"<>|):
+    - strips control characters (0x00-0x1F), which are technically
+      illegal in NTFS filenames too and can occasionally slip through
+      into a YouTube video title
+    - strips trailing dots/spaces - Windows silently drops these when a
+      file is actually created, which would otherwise make the name
+      LoopClip displays/tracks differ from the name Windows actually
+      kept on disk
+    - rejects the reserved device names (CON, PRN, AUX, NUL, COM1-9,
+      LPT1-9) that are unusable as a filename on Windows regardless of
+      extension, by prefixing rather than silently dropping the title
+    - caps length (see _MAX_SANITIZED_TITLE_LENGTH) so a long source
+      title can't push the full output path over Windows' path length
+      limits
+    - falls back to "video" if nothing usable is left after cleaning
+      (e.g. a title that was entirely illegal characters)
+    """
+    cleaned = re.sub(r'[\x00-\x1f\\/:*?"<>|]', "", title or "")
+    cleaned = cleaned.strip().rstrip(" .")
+
+    if len(cleaned) > _MAX_SANITIZED_TITLE_LENGTH:
+        cleaned = cleaned[:_MAX_SANITIZED_TITLE_LENGTH].rstrip(" .")
+
+    if not cleaned:
+        cleaned = "video"
+
+    if cleaned.upper() in _WINDOWS_RESERVED_NAMES:
+        cleaned = f"_{cleaned}"
+
+    return cleaned
+
+
+def unique_output_path(path: str) -> str:
+    """
+    If `path` doesn't already exist, returns it unchanged. If it does,
+    returns a variant with ' (2)', ' (3)', etc. inserted before the
+    extension, trying successive numbers until an unused path is found.
+
+    Generated output filenames are derived from the source video's
+    title, so two different source videos that happen to share a title
+    (e.g. two separate uploads/re-uploads of "Aquarium 4K") would
+    otherwise both resolve to the exact same output path - and every
+    encode here runs FFmpeg with -y, which overwrites the destination
+    without asking. This is the guard against that: called once, right
+    when an output path is first decided, before any processing starts.
+    """
+    p = Path(path)
+    if not p.exists():
+        return path
+    n = 2
+    while True:
+        candidate = p.with_name(f"{p.stem} ({n}){p.suffix}")
+        if not candidate.exists():
+            return str(candidate)
+        n += 1
 
 
 def build_output_filename(title: str, duration_seconds: float) -> str:
@@ -103,7 +180,13 @@ def build_output_filename(title: str, duration_seconds: float) -> str:
 
 def _audio_args(audio_bitrate: str, no_audio: bool) -> list:
     if no_audio:
-        return []
+        # "-an" is required to actually drop the audio stream. Simply
+        # omitting a "-c:a ..." flag does NOT do this - ffmpeg still maps
+        # and encodes the source's audio track with its own default codec
+        # choice when no explicit codec or stream selection is given, so
+        # an empty args list here previously left --no-audio silently
+        # doing nothing.
+        return ["-an"]
     if audio_bitrate == "original":
         return ["-c:a", "copy"]
     return ["-c:a", "aac", "-b:a", f"{audio_bitrate}k"]
@@ -157,9 +240,10 @@ def process_video(
         return
 
     # Fallback: re-encode the video (needed if stream copy can't cut
-    # cleanly on this codec). Target spec: H.265/HEVC, forced 4K UHD
-    # output (3840x2160) regardless of source resolution, user-selected
-    # target bitrate, 30fps. Tries NVIDIA NVENC (GPU) first, and only
+    # cleanly on this codec). Target spec: H.265/HEVC, capped at
+    # MAX_OUTPUT_WIDTH wide (downscaled only if the source is larger,
+    # never upscaled), user-selected target bitrate, source frame rate
+    # preserved (no forced -r). Tries NVIDIA NVENC (GPU) first, and only
     # falls back to slower CPU encoding (libx265) if no Nvidia GPU/driver
     # is available on the machine running this.
     hevc_nvenc_cmd = [
@@ -167,14 +251,13 @@ def process_video(
         *seek_args,
         "-i", input_path,
         *duration_args,
-        "-vf", "scale=3840:2160,format=nv12",
+        "-vf", f"{_scale_filter()},format=nv12",
         "-c:v", "hevc_nvenc",
         "-preset", "p4",  # NVENC speed/quality preset (p1 fastest - p7 slowest)
         "-rc", "vbr",
         "-b:v", vbitrate,
         "-maxrate", vbitrate,
         "-bufsize", f"{int(video_bitrate) * 2}M",
-        "-r", "30",
         *audio_args,
         output_path,
     ]
@@ -185,7 +268,7 @@ def process_video(
     nvenc_tail = "\n".join((nvenc_stderr or "").strip().splitlines()[-4:])
 
     # CPU fallback (no Nvidia GPU available, or NVENC failed for some
-    # other reason) - same H.265/bitrate/framerate/resolution target via libx265.
+    # other reason) - same H.265/bitrate/resolution-cap target via libx265.
     # Thread count is deliberately capped: libx265 at 4K with its default
     # (unlimited) thread pools can use a very large amount of RAM, enough
     # to make the whole machine unresponsive on systems that don't have a
@@ -196,7 +279,7 @@ def process_video(
         *seek_args,
         "-i", input_path,
         *duration_args,
-        "-vf", "scale=3840:2160",
+        "-vf", _scale_filter(),
         "-c:v", "libx265",
         "-preset", "veryfast",
         "-threads", "4",
@@ -204,18 +287,60 @@ def process_video(
         "-b:v", vbitrate,
         "-maxrate", vbitrate,
         "-bufsize", f"{int(video_bitrate) * 2}M",
-        "-r", "30",
         *audio_args,
         output_path,
     ]
     returncode, cpu_stderr = _run_ffmpeg(hevc_cpu_cmd, process_holder, cancel_check)
     if returncode != 0:
         cpu_tail = "\n".join((cpu_stderr or "").strip().splitlines()[-6:])
+        _remove_partial_output(output_path)
         raise RuntimeError(
             "FFmpeg reported an error while processing this video.\n\n"
             f"GPU (NVENC) attempt failed with:\n{nvenc_tail}\n\n"
             f"CPU fallback then also failed with:\n{cpu_tail}"
         )
+
+
+def _scale_filter(max_width: int = MAX_OUTPUT_WIDTH) -> str:
+    """
+    FFmpeg scale expression that downscales only if the source is wider
+    than max_width, and otherwise leaves resolution untouched - never
+    upscales a smaller source up to the cap. Height is derived with -2
+    (nearest even number) to preserve aspect ratio, since most encoders
+    require even dimensions.
+    """
+    return f"scale='min({max_width},iw)':-2"
+
+
+def get_fps(path: str) -> float:
+    """
+    Returns the source's native frame rate via ffprobe (r_frame_rate,
+    e.g. "30000/1001" for 29.97fps). Used so re-encode fallbacks can
+    preserve the source's actual frame rate instead of forcing a fixed
+    one. Falls back to 30.0 if it can't be determined (e.g. ffprobe
+    missing or the stream has no frame rate info) rather than raising -
+    callers already have a sensible default to fall back to.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=r_frame_rate",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                path,
+            ],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            creationflags=_NO_WINDOW,
+        )
+        raw = result.stdout.strip()
+        if "/" in raw:
+            num, den = raw.split("/", 1)
+            fps = float(num) / float(den) if float(den) != 0 else 30.0
+        else:
+            fps = float(raw)
+        return fps if fps > 0 else 30.0
+    except (ValueError, OSError, FileNotFoundError):
+        return 30.0
 
 
 def get_duration_seconds(path: str) -> float:
@@ -319,6 +444,14 @@ def apply_seamless_loop(
         )
         return
 
+    # Every piece fed into the xfade/concat pipeline below (head, tail,
+    # transition, middle) is normalized to this single fixed CFR rate -
+    # using the source's own native fps (instead of a hardcoded 30) means
+    # e.g. a 60fps source still loops at 60fps rather than losing half its
+    # temporal quality. See _quick_trim/_crossfade_two_clips/_encode_segment
+    # docstrings for why a fixed, matching rate is required here at all.
+    fps = get_fps(input_path)
+
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
     end_start = duration - x
@@ -334,19 +467,19 @@ def apply_seamless_loop(
         try:
             _quick_trim(
                 input_path, head_path, 0, x, no_audio, process_holder, cancel_check,
-                force_reencode=True,
+                force_reencode=True, fps=fps,
             )
             _quick_trim(
                 input_path, tail_path, end_start, duration, no_audio, process_holder, cancel_check,
-                force_reencode=True,
+                force_reencode=True, fps=fps,
             )
             _crossfade_two_clips(
                 tail_path, head_path, transition_path, x, video_bitrate, no_audio,
-                process_holder, cancel_check,
+                process_holder, cancel_check, fps=fps,
             )
             _encode_segment(
                 input_path, middle_path, x, end_start, video_bitrate, no_audio,
-                process_holder, cancel_check, error_context="the main body of the clip",
+                process_holder, cancel_check, error_context="the main body of the clip", fps=fps,
             )
 
             with open(concat_list_path, "w", encoding="utf-8") as f:
@@ -360,6 +493,7 @@ def apply_seamless_loop(
             returncode, stderr = _run_ffmpeg(concat_cmd, process_holder, cancel_check)
             if returncode != 0 or not Path(output_path).exists():
                 tail_err = "\n".join((stderr or "").strip().splitlines()[-6:])
+                _remove_partial_output(output_path)
                 raise RuntimeError(
                     f"FFmpeg reported an error while joining the seamless loop segments:\n{tail_err}"
                 )
@@ -402,7 +536,9 @@ def _plain_copy_fallback(
     spec only if a straight copy isn't possible for this source.
     """
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    audio_args = [] if no_audio else ["-c:a", "copy"]
+    # "-an" (not just omitting -c:a) is required to actually drop audio -
+    # see _audio_args' docstring note for why.
+    audio_args = ["-an"] if no_audio else ["-c:a", "copy"]
 
     copy_cmd = [
         "ffmpeg", "-y", "-i", input_path,
@@ -414,14 +550,14 @@ def _plain_copy_fallback(
         return
 
     vbitrate = f"{video_bitrate}M"
-    reencode_audio_args = [] if no_audio else ["-c:a", "aac", "-b:a", "192k"]
+    reencode_audio_args = ["-an"] if no_audio else ["-c:a", "aac", "-b:a", "192k"]
 
     nvenc_cmd = [
         "ffmpeg", "-y", "-i", input_path,
-        "-vf", "scale=3840:2160,format=nv12",
+        "-vf", f"{_scale_filter()},format=nv12",
         "-c:v", "hevc_nvenc", "-preset", "p4", "-rc", "vbr",
         "-b:v", vbitrate, "-maxrate", vbitrate, "-bufsize", f"{int(video_bitrate) * 2}M",
-        "-r", "30", *reencode_audio_args, output_path,
+        *reencode_audio_args, output_path,
     ]
     returncode, nvenc_stderr = _run_ffmpeg(nvenc_cmd, process_holder, cancel_check)
     if returncode == 0 and Path(output_path).exists():
@@ -431,15 +567,16 @@ def _plain_copy_fallback(
 
     cpu_cmd = [
         "ffmpeg", "-y", "-i", input_path,
-        "-vf", "scale=3840:2160",
+        "-vf", _scale_filter(),
         "-c:v", "libx265", "-preset", "veryfast", "-threads", "4",
         "-x265-params", "pools=4:frame-threads=2",
         "-b:v", vbitrate, "-maxrate", vbitrate, "-bufsize", f"{int(video_bitrate) * 2}M",
-        "-r", "30", *reencode_audio_args, output_path,
+        *reencode_audio_args, output_path,
     ]
     returncode, cpu_stderr = _run_ffmpeg(cpu_cmd, process_holder, cancel_check)
     if returncode != 0:
         cpu_tail = "\n".join((cpu_stderr or "").strip().splitlines()[-6:])
+        _remove_partial_output(output_path)
         raise RuntimeError(
             "FFmpeg reported an error while saving the clip without a seamless "
             "loop (the crossfade attempt also failed earlier).\n\n"
@@ -451,7 +588,7 @@ def _plain_copy_fallback(
 def _quick_trim(
     input_path: str, output_path: str, start: float, end: float, no_audio: bool,
     process_holder: Optional[dict], cancel_check: Optional[Callable[[], bool]],
-    force_reencode: bool = False,
+    force_reencode: bool = False, fps: float = 30.0,
 ) -> None:
     """Extracts [start, end) of input_path into a small standalone file -
     used for pulling out the tiny head/tail pieces before blending them.
@@ -464,12 +601,18 @@ def _quick_trim(
     `xfade`/`acrossfade` filter graph (as it is from apply_seamless_loop):
     a stream copy preserves the source's original frame timing verbatim,
     including any variable frame rate, which can make those filters hang
-    indefinitely. Re-encoding to a fixed 30fps CFR timebase up front avoids
+    indefinitely. Re-encoding to a fixed CFR timebase up front avoids
     that, and costs almost nothing since these clips are only a couple of
-    seconds long.
+    seconds long. `fps` should be the source's own native frame rate
+    (see get_fps) so a 60fps source still loops at 60fps rather than
+    being knocked down to a fixed 30 regardless of source - it just needs
+    to be *some* fixed, matching rate shared by every piece that gets fed
+    into xfade/concat later.
     """
     dur = end - start
-    audio_args = [] if no_audio else ["-c:a", "copy"]
+    # "-an" (not just omitting -c:a) is required to actually drop audio -
+    # see _audio_args' docstring note for why.
+    audio_args = ["-an"] if no_audio else ["-c:a", "copy"]
 
     if not force_reencode:
         copy_cmd = [
@@ -482,39 +625,46 @@ def _quick_trim(
 
     reencode_cmd = [
         "ffmpeg", "-y", "-ss", str(start), "-i", input_path, "-t", str(dur),
-        "-vf", "fps=30",
+        "-vf", f"fps={fps}",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        *([] if no_audio else ["-c:a", "aac", "-b:a", "192k", "-af", "aresample=async=1"]),
+        *(["-an"] if no_audio else ["-c:a", "aac", "-b:a", "192k", "-af", "aresample=async=1"]),
         output_path,
     ]
     returncode, stderr = _run_ffmpeg(reencode_cmd, process_holder, cancel_check)
     if returncode != 0:
         tail_err = "\n".join((stderr or "").strip().splitlines()[-6:])
+        _remove_partial_output(output_path)
         raise RuntimeError(f"FFmpeg reported an error while extracting a loop segment:\n{tail_err}")
 
 
 def _crossfade_two_clips(
     tail_path: str, head_path: str, output_path: str, x: float, video_bitrate: str,
     no_audio: bool, process_holder: Optional[dict], cancel_check: Optional[Callable[[], bool]],
+    fps: float = 30.0,
 ) -> None:
     """Blends tail_path into head_path into a single x-second transition
     clip. Both inputs are already tiny standalone files at this point, so
     this stays cheap no matter how long the original source video was.
 
-    Both video streams are forced to a fixed 30fps CFR timebase (and audio
-    is nudged into sync with aresample=async) immediately before the
+    Both video streams are forced to a fixed CFR timebase (and audio is
+    nudged into sync with aresample=async) immediately before the
     xfade/acrossfade filters. `xfade` in particular expects frames to
     arrive on a steady, predictable cadence from both inputs - if either
-    input is VFR (as h ead/tail pieces stream-copied straight from a
+    input is VFR (as head/tail pieces stream-copied straight from a
     YouTube source often are), it can stall indefinitely instead of
     erroring out, which is what produced the "hangs forever" behaviour.
     Normalizing here means this holds even if _quick_trim's inputs ever
-    change upstream.
+    change upstream. `fps` should match the source's native rate (see
+    get_fps) and the rate _quick_trim/_encode_segment normalized their
+    outputs to, so a 60fps source loops at 60fps CFR instead of being
+    knocked down to a fixed 30 - the actual value just needs to be
+    consistent across every piece that gets fed into this filter graph
+    and the concat step afterward.
     """
     vbitrate = f"{video_bitrate}M"
     video_graph = (
-        "[0:v]fps=30,format=nv12[v0];"
-        "[1:v]fps=30,format=nv12[v1];"
+        f"[0:v]fps={fps},format=nv12[v0];"
+        f"[1:v]fps={fps},format=nv12[v1];"
         f"[v0][v1]xfade=transition=fade:duration={x}:offset=0,format=nv12[vout]"
     )
 
@@ -537,7 +687,7 @@ def _crossfade_two_clips(
         "-filter_complex", filter_complex, *map_args,
         "-c:v", "hevc_nvenc", "-preset", "p4", "-rc", "vbr",
         "-b:v", vbitrate, "-maxrate", vbitrate, "-bufsize", f"{int(video_bitrate) * 2}M",
-        "-r", "30", *audio_out_args, output_path,
+        *audio_out_args, output_path,
     ]
     returncode, nvenc_stderr = _run_ffmpeg(nvenc_cmd, process_holder, cancel_check)
     if returncode == 0 and Path(output_path).exists():
@@ -551,11 +701,12 @@ def _crossfade_two_clips(
         "-c:v", "libx265", "-preset", "veryfast", "-threads", "4",
         "-x265-params", "pools=4:frame-threads=2",
         "-b:v", vbitrate, "-maxrate", vbitrate, "-bufsize", f"{int(video_bitrate) * 2}M",
-        "-r", "30", *audio_out_args, output_path,
+        *audio_out_args, output_path,
     ]
     returncode, cpu_stderr = _run_ffmpeg(cpu_cmd, process_holder, cancel_check)
     if returncode != 0:
         cpu_tail = "\n".join((cpu_stderr or "").strip().splitlines()[-6:])
+        _remove_partial_output(output_path)
         raise RuntimeError(
             "FFmpeg reported an error while blending the loop transition.\n\n"
             f"GPU (NVENC) attempt failed with:\n{nvenc_tail}\n\n"
@@ -566,23 +717,27 @@ def _crossfade_two_clips(
 def _encode_segment(
     input_path: str, output_path: str, start: float, end: float, video_bitrate: str,
     no_audio: bool, process_holder: Optional[dict], cancel_check: Optional[Callable[[], bool]],
-    error_context: str,
+    error_context: str, fps: float = 30.0,
 ) -> None:
-    """Encodes [start, end) of input_path to the standard H.265/4K/bitrate/
-    30fps spec used elsewhere, so it can be joined to another clip of the
-    same spec via a cheap stream-copy concat afterward. This is a plain,
-    ordinary trim+encode (no cross-branch filtering), so it's exactly as
-    memory-cheap as the app's normal main trim step regardless of length."""
+    """Encodes [start, end) of input_path to the standard H.265/resolution-
+    cap/bitrate spec used elsewhere, at a fixed `fps` (matching the
+    source's native rate - see get_fps), so it can be joined to another
+    clip of the same spec via a cheap stream-copy concat afterward. This
+    is a plain, ordinary trim+encode (no cross-branch filtering), so it's
+    exactly as memory-cheap as the app's normal main trim step regardless
+    of length."""
     dur = end - start
     vbitrate = f"{video_bitrate}M"
-    audio_args = [] if no_audio else ["-c:a", "aac", "-b:a", "192k"]
+    # "-an" (not just omitting -c:a) is required to actually drop audio -
+    # see _audio_args' docstring note for why.
+    audio_args = ["-an"] if no_audio else ["-c:a", "aac", "-b:a", "192k"]
 
     nvenc_cmd = [
         "ffmpeg", "-y", "-ss", str(start), "-i", input_path, "-t", str(dur),
-        "-vf", "scale=3840:2160,format=nv12",
+        "-vf", f"{_scale_filter()},fps={fps},format=nv12",
         "-c:v", "hevc_nvenc", "-preset", "p4", "-rc", "vbr",
         "-b:v", vbitrate, "-maxrate", vbitrate, "-bufsize", f"{int(video_bitrate) * 2}M",
-        "-r", "30", *audio_args, output_path,
+        *audio_args, output_path,
     ]
     returncode, nvenc_stderr = _run_ffmpeg(nvenc_cmd, process_holder, cancel_check)
     if returncode == 0 and Path(output_path).exists():
@@ -592,15 +747,16 @@ def _encode_segment(
 
     cpu_cmd = [
         "ffmpeg", "-y", "-ss", str(start), "-i", input_path, "-t", str(dur),
-        "-vf", "scale=3840:2160",
+        "-vf", f"{_scale_filter()},fps={fps}",
         "-c:v", "libx265", "-preset", "veryfast", "-threads", "4",
         "-x265-params", "pools=4:frame-threads=2",
         "-b:v", vbitrate, "-maxrate", vbitrate, "-bufsize", f"{int(video_bitrate) * 2}M",
-        "-r", "30", *audio_args, output_path,
+        *audio_args, output_path,
     ]
     returncode, cpu_stderr = _run_ffmpeg(cpu_cmd, process_holder, cancel_check)
     if returncode != 0:
         cpu_tail = "\n".join((cpu_stderr or "").strip().splitlines()[-6:])
+        _remove_partial_output(output_path)
         raise RuntimeError(
             f"FFmpeg reported an error while encoding {error_context}.\n\n"
             f"GPU (NVENC) attempt failed with:\n{nvenc_tail}\n\n"
@@ -674,3 +830,90 @@ def _terminate(proc: subprocess.Popen):
         proc.kill()
     except Exception:
         pass
+
+
+def _remove_partial_output(path: str) -> None:
+    """
+    Best-effort removal of a partial/corrupt output file left behind by a
+    failed FFmpeg run.
+
+    FFmpeg (run with -y, as every command here is) creates and starts
+    writing the destination file as soon as it starts encoding - it
+    doesn't wait until the end to write anything. So a mid-encode failure
+    (a bad filter, an out-of-memory kill, running out of disk space, the
+    process being killed some other way) can leave a truncated, unplayable
+    file sitting at output_path. That's worse than no file at all: code
+    (or a person) checking "does the output exist?" could mistake its
+    mere presence for success. Called right before every "FFmpeg failed
+    for real" error is raised, so callers never have to deal with a
+    corrupt leftover after an exception - only ever a clean absence.
+
+    Deliberately swallows OSError: this is just tidy-up alongside a
+    failure that's already being reported through the exception being
+    raised; failing to clean up (e.g. a locked file on Windows) shouldn't
+    mask or replace the original, more important error.
+    """
+    try:
+        p = Path(path)
+        if p.exists():
+            p.unlink()
+    except OSError:
+        pass
+
+
+class OutputValidationError(RuntimeError):
+    """Raised by verify_output() when a produced file fails a sanity check."""
+
+
+def verify_output(path: str, expect_audio: bool) -> None:
+    """
+    Basic post-processing sanity check on a file LoopClip just produced:
+    it exists, is non-empty, FFprobe can actually open it, it has a video
+    stream, and (if expect_audio) an audio stream too.
+
+    This catches the gap between "FFmpeg exited with code 0" and "the
+    result is actually a usable video file" - which aren't the same
+    thing. FFmpeg can report success while still having produced an
+    unusable file: e.g. disk space running out right at the very end of
+    a write, after most of the encode had already completed successfully
+    and exit-code checks along the way all looked fine.
+
+    Raises OutputValidationError (a RuntimeError) with a specific,
+    human-readable reason on failure. Deliberately not called
+    automatically inside every processor.* function - callers that want
+    this extra check (the CLI end-to-end path, for example) call it
+    explicitly once processing is otherwise complete, so it stays a
+    single, final gate rather than adding an ffprobe round-trip after
+    every intermediate step.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise OutputValidationError(f"Output file was not created: {path}")
+    if p.stat().st_size <= 0:
+        raise OutputValidationError(f"Output file is empty (0 bytes): {path}")
+
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "stream=codec_type",
+                "-of", "csv=p=0", str(p),
+            ],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            creationflags=_NO_WINDOW,
+        )
+    except (OSError, FileNotFoundError) as exc:
+        raise OutputValidationError(
+            f"Could not verify the output file with FFprobe: {exc}"
+        ) from exc
+
+    if result.returncode != 0:
+        raise OutputValidationError(
+            f"FFprobe could not open the output file - it may be corrupt: {path}"
+        )
+
+    streams = result.stdout.strip().splitlines()
+    if "video" not in streams:
+        raise OutputValidationError(f"Output file has no video stream: {path}")
+    if expect_audio and "audio" not in streams:
+        raise OutputValidationError(f"Output file is missing its audio stream: {path}")
