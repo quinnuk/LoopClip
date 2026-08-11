@@ -75,7 +75,7 @@ It was originally built for **Projectivy Launcher** on a 4K TV, but works for an
 - **Retry** on a failed item reuses the already-downloaded source file if the download itself succeeded and a later step failed, instead of downloading the video again
 - Dark, Windows 11–style UI (CustomTkinter)
 
-> **Not yet included:** drag-and-drop, a video library manager, playlist/channel downloads, GPU-accelerated frame analysis for auto-detect (currently CPU-only — see [Requirements](#requirements)).
+> **Not yet included:** drag-and-drop, a video library manager, playlist/channel downloads. (Auto-detect's frame analysis is currently CPU-only — see [Requirements](#requirements).)
 
 ## Download
 
