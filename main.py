@@ -240,6 +240,83 @@ class _TimeEntry(ctk.CTkFrame):
             box.configure(state=state)
 
 
+class _ToolTip:
+    """
+    A small hover tooltip for any widget - shows `text` in a borderless
+    popup near the cursor after a short delay, and hides it again on
+    mouse-leave or click. CustomTkinter has no built-in tooltip widget,
+    so this is a minimal one built directly on Tk's <Enter>/<Leave>
+    events rather than adding a third-party dependency for something
+    this small.
+
+    The delay (400ms) exists so tooltips don't flash into view while the
+    cursor just passes over a widget on its way somewhere else - only
+    genuinely hovering (pausing) triggers it, matching how tooltips
+    behave in most desktop apps.
+    """
+
+    DELAY_MS = 400
+
+    def __init__(self, widget, text: str):
+        self.widget = widget
+        self.text = text
+        self._after_id = None
+        self._tip_window = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<Button-1>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel_pending()
+        self._after_id = self.widget.after(self.DELAY_MS, self._show)
+
+    def _cancel_pending(self):
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _show(self):
+        if self._tip_window is not None or not self.widget.winfo_exists():
+            return
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+
+        tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)  # no title bar/borders - just the tip
+        tw.wm_geometry(f"+{x}+{y}")
+        tw.configure(bg=COLOR_ACCENT)
+        try:
+            tw.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        label = ctk.CTkLabel(
+            tw, text=self.text, font=ctk.CTkFont(size=11),
+            fg_color=COLOR_PANEL, text_color="white",
+            corner_radius=6, justify="left", wraplength=280,
+            padx=10, pady=6,
+        )
+        label.pack()
+        self._tip_window = tw
+
+    def _hide(self, _event=None):
+        self._cancel_pending()
+        if self._tip_window is not None:
+            try:
+                self._tip_window.destroy()
+            except Exception:
+                pass
+            self._tip_window = None
+
+
+def _add_tooltip(widget, text: str) -> _ToolTip:
+    """Convenience wrapper - see _ToolTip for behavior."""
+    return _ToolTip(widget, text)
+
+
 class LoopClipApp(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -276,6 +353,132 @@ class LoopClipApp(ctk.CTk):
                 self.iconbitmap(str(icon_path))
             except tk.TclError:
                 pass
+
+    def _show_help_dialog(self):
+        """
+        A single reference dialog explaining what each of the less
+        self-explanatory settings actually does, for anyone who wants
+        the full picture in one place rather than hovering over each
+        field's tooltip individually. Uses a CTkTextbox (scrollable,
+        read-only) rather than trying to fit everything in a fixed-size
+        dialog - long-form help content should always be expected to
+        need scrolling on some screen/font combination, so this doesn't
+        try to guess a height that fits everything (see
+        _show_about_dialog's history for why that guess is fragile
+        across different machines - here the answer is just "always
+        scrollable" instead of "measure and hope").
+        """
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("LoopClip Help")
+        dialog.geometry("480x560")
+        dialog.minsize(360, 300)
+        dialog.configure(fg_color=COLOR_BG)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ctk.CTkLabel(
+            dialog, text="What these settings do",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).pack(pady=(16, 10))
+
+        textbox = ctk.CTkTextbox(
+            dialog, fg_color=COLOR_PANEL, wrap="word",
+            font=ctk.CTkFont(size=12),
+        )
+        textbox.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+
+        # Bold section headers via the underlying tkinter Text widget's
+        # tag system - CTkTextbox doesn't expose rich-text formatting
+        # directly, but wraps a real Text widget that does.
+        heading_font = ctk.CTkFont(size=12, weight="bold")
+        textbox._textbox.tag_configure("heading", font=heading_font, foreground=COLOR_ACCENT)
+
+        sections = [
+            ("Download Quality", (
+                "Best Available picks whichever video+audio streams YouTube "
+                "offers at the highest quality, regardless of codec.\n"
+                "4K HDR Preferred favors an HDR-capable 4K stream when the "
+                "source has one.\n"
+                "1080p Compatible caps downloads at 1080p, for smaller files "
+                "and broader device compatibility."
+            )),
+            ("Video Bitrate / Audio Bitrate", (
+                "Video Bitrate only applies to the H.265 re-encode fallback - "
+                "used when a clean stream-copy trim isn't possible for the "
+                "source. Higher means better quality and larger files.\n\n"
+                "Audio Bitrate's 'Original' keeps the source audio as-is "
+                "without re-encoding it; a specific value re-encodes the "
+                "audio track to that target instead."
+            )),
+            ("Auto-detect seamless loop", (
+                "When enabled, LoopClip searches the video for a point where "
+                "it can loop cleanly, instead of you picking trim points "
+                "manually.\n\n"
+                "Method controls how frames get compared: Combined "
+                "(recommended) blends structural and color matching for the "
+                "most reliable results; SSIM checks structural similarity "
+                "only; Histogram checks color distribution only; Hash is "
+                "fastest but least precise.\n\n"
+                "Similarity % sets how closely the start and end of a "
+                "candidate loop need to match (0-100) - higher demands a "
+                "closer match; lower is more lenient.\n\n"
+                "Analyze controls how many frames get compared - 'Every "
+                "frame' is most thorough but slowest; skipping frames "
+                "analyzes faster at some cost to precision, useful for very "
+                "long videos."
+            )),
+            ("Limit search window", (
+                "Restricts the loop search to a specific From/To portion of "
+                "the video instead of scanning the whole thing - useful for "
+                "skipping intros/outros, or speeding up analysis on long "
+                "videos."
+            )),
+            ("Seamless loop crossfade", (
+                "Blends the end of the clip into the start over the chosen "
+                "duration, smoothing out any visible seam at the loop point. "
+                "Leave this off for a hard cut instead - it's optional, and "
+                "auto-detect can already find clean loop points without it."
+            )),
+            ("After Download", (
+                "Delete original large file removes the full downloaded "
+                "source once the clip has been created, keeping only the "
+                "final output.\n\n"
+                "Open folder when finished opens the output folder in "
+                "Explorer automatically once a queued video is done."
+            )),
+            ("Command line", (
+                "Everything here is also available without the GUI via "
+                "cli.py, for scripting or automation - run "
+                "'python cli.py --help' for the full list of options, or "
+                "see the README's Command-Line Usage section."
+            )),
+        ]
+
+        for heading, body in sections:
+            textbox.insert("end", heading + "\n", "heading")
+            textbox.insert("end", body + "\n\n")
+
+        textbox.configure(state="disabled")  # read-only after populating
+
+        ctk.CTkButton(
+            dialog, text="Close", width=100, fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOVER,
+            # Deferred by a tick rather than dialog.destroy directly:
+            # confirmed directly (isolated, reproducible minimal repro)
+            # that a CTkToplevel containing a CTkTextbox destroyed
+            # synchronously inside a button's own click handler can hit
+            # a genuine CustomTkinter-internal timing bug - some
+            # widget's deferred internal callback (most likely the
+            # textbox's scrollbar) is still pending when everything gets
+            # torn down, and fires afterward against an already-destroyed
+            # canvas ("invalid command name ...canvas"). A CTkButton
+            # alone, with no CTkTextbox present, does not trigger this -
+            # it's specific to that combination. Giving pending internal
+            # callbacks one more event-loop tick to complete before
+            # destroying reliably avoids it (verified across 5 repeated
+            # runs of the isolated repro with this fix applied).
+            command=lambda: dialog.after(50, dialog.destroy),
+        ).pack(pady=(0, 16))
 
     def _show_about_dialog(self):
         """
@@ -566,6 +769,11 @@ class LoopClipApp(ctk.CTk):
             fg_color="transparent", hover_color=COLOR_PANEL, text_color="gray60",
             command=self._show_about_dialog,
         ).pack(side="right")
+        ctk.CTkButton(
+            header_row, text="Help", width=56, height=22, font=ctk.CTkFont(size=11),
+            fg_color="transparent", hover_color=COLOR_PANEL, text_color="gray60",
+            command=self._show_help_dialog,
+        ).pack(side="right", padx=(0, 4))
 
         ctk.CTkLabel(
             self, text="Paste a YouTube link, set your options, then queue it up.",
@@ -615,7 +823,15 @@ class LoopClipApp(ctk.CTk):
 
         # Download quality (left column) - segmented button, same control
         # style as Video Downloader Pro's quality selector.
-        ctk.CTkLabel(left, text="Download Quality", anchor="w").pack(fill="x")
+        quality_label = ctk.CTkLabel(left, text="Download Quality", anchor="w")
+        quality_label.pack(fill="x")
+        _add_tooltip(
+            quality_label,
+            "Best Available picks whichever video+audio streams YouTube offers "
+            "at the highest quality, any codec. 4K HDR Preferred favors an "
+            "HDR-capable 4K stream when the source has one. 1080p Compatible "
+            "caps at 1080p for smaller files and broader compatibility.",
+        )
         self.quality_var = ctk.StringVar(value=self.cfg.get("quality", "best"))
         quality_values_by_label = {label: value for value, label in QUALITY_LABELS.items()}
         self.quality_display_var = ctk.StringVar(
@@ -632,7 +848,14 @@ class LoopClipApp(ctk.CTk):
 
         video_bitrate_row = ctk.CTkFrame(left, fg_color="transparent")
         video_bitrate_row.pack(fill="x", pady=(2, 0))
-        ctk.CTkLabel(video_bitrate_row, text="Video Bitrate", anchor="w").pack(side="left")
+        video_bitrate_label = ctk.CTkLabel(video_bitrate_row, text="Video Bitrate", anchor="w")
+        video_bitrate_label.pack(side="left")
+        _add_tooltip(
+            video_bitrate_label,
+            "Target bitrate for the H.265 re-encode fallback, used only when "
+            "a clean stream-copy trim isn't possible for the source. Higher "
+            "means better quality and larger files.",
+        )
         self.video_bitrate_var = ctk.StringVar(
             value=self._video_bitrate_to_label(self.cfg.get("video_bitrate", "15"))
         )
@@ -654,7 +877,14 @@ class LoopClipApp(ctk.CTk):
 
         bitrate_row = ctk.CTkFrame(left, fg_color="transparent")
         bitrate_row.pack(fill="x", pady=(6, 0))
-        ctk.CTkLabel(bitrate_row, text="Audio Bitrate", anchor="w").pack(side="left")
+        audio_bitrate_label = ctk.CTkLabel(bitrate_row, text="Audio Bitrate", anchor="w")
+        audio_bitrate_label.pack(side="left")
+        _add_tooltip(
+            audio_bitrate_label,
+            "Original keeps the source audio as-is, without re-encoding it. "
+            "Choosing a specific bitrate re-encodes the audio track to that "
+            "target instead.",
+        )
         self.audio_bitrate_var = ctk.StringVar(
             value=self._bitrate_to_label(self.cfg.get("audio_bitrate", "original"))
         )
@@ -682,7 +912,17 @@ class LoopClipApp(ctk.CTk):
 
         method_row = ctk.CTkFrame(right, fg_color="transparent")
         method_row.pack(fill="x")
-        ctk.CTkLabel(method_row, text="Method", anchor="w", width=90).pack(side="left")
+        method_label = ctk.CTkLabel(method_row, text="Method", anchor="w", width=90)
+        method_label.pack(side="left")
+        _add_tooltip(
+            method_label,
+            "How LoopClip compares frames while searching for a loop point.\n\n"
+            "Combined (recommended): blends structural + color matching for "
+            "the most reliable results.\n"
+            "SSIM: structural similarity only.\n"
+            "Histogram: color distribution only.\n"
+            "Hash: fastest, least precise.",
+        )
         method_values_by_label = {label: value for value, label in LOOP_METHOD_LABELS}
         self.loop_method_var = ctk.StringVar(
             value=self._loop_method_to_label(self.cfg.get("loop_method", "combined"))
@@ -698,7 +938,15 @@ class LoopClipApp(ctk.CTk):
 
         similarity_row = ctk.CTkFrame(right, fg_color="transparent")
         similarity_row.pack(fill="x", pady=(6, 0))
-        ctk.CTkLabel(similarity_row, text="Similarity %", anchor="w", width=90).pack(side="left")
+        similarity_label = ctk.CTkLabel(similarity_row, text="Similarity %", anchor="w", width=90)
+        similarity_label.pack(side="left")
+        _add_tooltip(
+            similarity_label,
+            "How closely the start and end of a candidate loop need to match, "
+            "0-100. Higher demands a closer match (fewer, more seamless "
+            "candidates); lower is more lenient (more candidates found, "
+            "possibly less seamless).",
+        )
         self.similarity_entry = ctk.CTkEntry(similarity_row, width=60, fg_color=COLOR_PANEL)
         self.similarity_entry.insert(0, str(self.cfg.get("similarity", 98)))
         self.similarity_entry.bind("<FocusOut>", lambda e: self._clamp_similarity())
@@ -706,7 +954,14 @@ class LoopClipApp(ctk.CTk):
 
         downsample_row = ctk.CTkFrame(right, fg_color="transparent")
         downsample_row.pack(fill="x", pady=(6, 0))
-        ctk.CTkLabel(downsample_row, text="Analyze", anchor="w", width=90).pack(side="left")
+        analyze_label = ctk.CTkLabel(downsample_row, text="Analyze", anchor="w", width=90)
+        analyze_label.pack(side="left")
+        _add_tooltip(
+            analyze_label,
+            "How many frames get compared during the search. 'Every frame' "
+            "is most thorough but slowest. Skipping frames analyzes faster "
+            "at some cost to precision - useful for very long videos.",
+        )
         downsample_values_by_label = {label: value for value, label in DOWNSAMPLE_LABELS}
         self.downsample_var = ctk.StringVar(
             value=self._downsample_to_label(str(self.cfg.get("downsample", 1)))
@@ -721,11 +976,18 @@ class LoopClipApp(ctk.CTk):
         self.downsample_menu.pack(side="left", padx=(6, 0))
 
         self.limit_search_var = ctk.BooleanVar(value=bool(self.cfg.get("search_stop", "")))
-        ctk.CTkCheckBox(
+        limit_search_cb = ctk.CTkCheckBox(
             right, text="Limit search window", variable=self.limit_search_var,
             fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
             command=self._on_limit_search_toggled,
-        ).pack(anchor="w", pady=(8, 4))
+        )
+        limit_search_cb.pack(anchor="w", pady=(8, 4))
+        _add_tooltip(
+            limit_search_cb,
+            "Restrict the loop search to a specific portion of the video "
+            "(From/To) instead of scanning the whole thing - useful for "
+            "skipping intros/outros, or speeding up analysis on long videos.",
+        )
 
         search_row = ctk.CTkFrame(right, fg_color="transparent")
         search_row.pack(fill="x")
@@ -750,11 +1012,18 @@ class LoopClipApp(ctk.CTk):
         loop_row = ctk.CTkFrame(right, fg_color="transparent")
         loop_row.pack(fill="x", pady=(10, 0))
         self.seamless_loop_var = ctk.BooleanVar(value=self.cfg.get("seamless_loop", False))
-        ctk.CTkCheckBox(
+        seamless_loop_cb = ctk.CTkCheckBox(
             loop_row, text="Seamless loop crossfade", variable=self.seamless_loop_var,
             fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
             command=self._on_seamless_loop_toggled,
-        ).pack(side="left")
+        )
+        seamless_loop_cb.pack(side="left")
+        _add_tooltip(
+            seamless_loop_cb,
+            "Blends the end of the clip into the start over the chosen "
+            "duration, smoothing out any visible seam at the loop point. "
+            "Leave unchecked for a hard cut instead.",
+        )
         self.crossfade_var = ctk.StringVar(
             value=self._crossfade_to_label(self.cfg.get("crossfade_seconds", "2"))
         )
