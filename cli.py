@@ -31,6 +31,12 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+# Must run before `import downloader` (which imports yt_dlp) - see
+# ytdlp_updater.py's module docstring for why. No-op if no yt-dlp update
+# has ever been applied.
+import ytdlp_updater
+ytdlp_updater.activate_pending_override()
+
 import downloader
 import loop_detector
 import processor

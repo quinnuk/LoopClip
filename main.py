@@ -13,19 +13,25 @@ two-column options layout with a segmented quality selector):
   5. "Cancel" stops the current video immediately and halts the queue.
 """
 
-import json
 import os
 import platform
 import tempfile
 import threading
 import time
-import urllib.request
 import webbrowser
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
+
+# Must run before any import that pulls in yt_dlp (queue_manager ->
+# downloader -> yt_dlp) - if a previously-downloaded yt-dlp update was
+# applied on a prior run, this makes `import yt_dlp` resolve to it
+# instead of whatever's frozen into the .exe / pip-installed. A no-op if
+# no update has ever been applied.
+import ytdlp_updater
+ytdlp_updater.activate_pending_override()
 
 import processor
 import settings as settings_module
@@ -257,7 +263,7 @@ class LoopClipApp(ctk.CTk):
         if missing:
             self.after(300, lambda: messagebox.showwarning("Missing requirements", missing))
 
-        self.update_notice_label = None  # created lazily, only if an update is found
+        self.update_notice_frame = None  # created lazily, only if an update is found
         threading.Thread(target=self._check_yt_dlp_update, daemon=True).start()
 
     def _set_app_icon(self):
@@ -385,11 +391,23 @@ class LoopClipApp(ctk.CTk):
 
         threading.Thread(target=_update_nvenc_status, daemon=True).start()
 
+        auto_update_var = tk.BooleanVar(value=self.cfg.get("auto_check_ytdlp_updates", True))
+
+        def _on_auto_update_toggle():
+            self.cfg["auto_check_ytdlp_updates"] = auto_update_var.get()
+            settings_module.save_settings(self.cfg)
+
+        ctk.CTkCheckBox(
+            dialog, text="Automatically check for yt-dlp updates",
+            variable=auto_update_var, command=_on_auto_update_toggle,
+            font=ctk.CTkFont(size=11), fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
+        ).pack(pady=(16, 0), padx=20, anchor="w")
+
         link_label = ctk.CTkLabel(
             dialog, text="github.com/quinnuk/LoopClip", text_color=COLOR_ACCENT,
             cursor="hand2", font=ctk.CTkFont(size=12, underline=True),
         )
-        link_label.pack(pady=(16, 4))
+        link_label.pack(pady=(12, 4))
         link_label.bind(
             "<Button-1>",
             lambda _e: webbrowser.open("https://github.com/quinnuk/LoopClip"),
@@ -418,36 +436,121 @@ class LoopClipApp(ctk.CTk):
         nice-to-have notice, not something that should ever interrupt
         the app.
         """
+        if not self.cfg.get("auto_check_ytdlp_updates", True):
+            return
         try:
-            req = urllib.request.Request(
-                "https://pypi.org/pypi/yt-dlp/json",
-                headers={"User-Agent": "LoopClip-UpdateCheck/1.0"},
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.load(resp)
-            latest = data["info"]["version"]
             installed = downloader.get_installed_version()
-
-            def version_tuple(v):
-                return tuple(int(p) for p in v.split("."))
-
-            if version_tuple(latest) > version_tuple(installed):
-                self.after(0, lambda: self._show_update_notice(installed, latest))
+            info = ytdlp_updater.check_for_update(installed)
+            if info is None:
+                return
+            if info.latest_version == self.cfg.get("skipped_ytdlp_version", ""):
+                return  # user already explicitly declined this exact version
+            self.after(0, lambda: self._show_update_notice(info))
         except Exception:
             pass  # Best-effort only - never surface this to the user as an error.
 
-    def _show_update_notice(self, installed: str, latest: str):
-        if self.update_notice_label is not None:
+    def _show_update_notice(self, info):
+        if self.update_notice_frame is not None:
             return  # already shown
-        self.update_notice_label = ctk.CTkLabel(
-            self,
-            text=(
-                f"A newer yt-dlp is available ({installed} -> {latest}). "
-                "Run: pip install -U yt-dlp"
-            ),
-            font=ctk.CTkFont(size=11), text_color="#E8A33D",
+
+        self.update_notice_frame = ctk.CTkFrame(self, fg_color=COLOR_PANEL)
+        self.update_notice_frame.pack(fill="x", padx=20, pady=(0, 8))
+
+        self._update_notice_label = ctk.CTkLabel(
+            self.update_notice_frame,
+            text=f"A newer yt-dlp is available ({info.current_version} \u2192 {info.latest_version}).",
+            font=ctk.CTkFont(size=11), text_color="#E8A33D", anchor="w",
         )
-        self.update_notice_label.pack(pady=(0, 4))
+        self._update_notice_label.pack(side="left", padx=(10, 6), pady=6)
+
+        button_row = ctk.CTkFrame(self.update_notice_frame, fg_color="transparent")
+        button_row.pack(side="right", padx=(6, 10), pady=4)
+
+        self._update_now_btn = ctk.CTkButton(
+            button_row, text="Update Now", width=90, height=24, font=ctk.CTkFont(size=11),
+            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
+            command=lambda: self._start_ytdlp_update(info),
+        )
+        self._update_now_btn.pack(side="left", padx=(0, 6))
+
+        self._update_skip_btn = ctk.CTkButton(
+            button_row, text="Skip", width=56, height=24, font=ctk.CTkFont(size=11),
+            fg_color="transparent", hover_color=COLOR_PANEL, text_color="gray60",
+            command=lambda: self._skip_ytdlp_update(info),
+        )
+        self._update_skip_btn.pack(side="left")
+
+    def _skip_ytdlp_update(self, info):
+        # Remembered so this exact version doesn't get offered again on
+        # every future launch - a newer version later still will be.
+        self.cfg["skipped_ytdlp_version"] = info.latest_version
+        settings_module.save_settings(self.cfg)
+        if self.update_notice_frame is not None:
+            self.update_notice_frame.destroy()
+            self.update_notice_frame = None
+
+    def _start_ytdlp_update(self, info):
+        """
+        Downloads and applies the update on a background thread - never
+        blocks the UI, and the rest of the app keeps working normally
+        while it runs (queueing/processing videos, etc. are untouched;
+        this only affects which yt-dlp gets used on the *next* launch,
+        never the one already running in this process - see
+        ytdlp_updater.py's docstring for why an in-process hot-swap isn't
+        attempted).
+        """
+        self._update_now_btn.configure(state="disabled", text="Updating...")
+        self._update_skip_btn.configure(state="disabled")
+
+        def do_update():
+            try:
+                wheel_path = ytdlp_updater.download_update(info)
+                ytdlp_updater.apply_update(wheel_path, info.latest_version)
+                self.after(0, lambda: self._on_ytdlp_update_success(info))
+            except ytdlp_updater.UpdateError as exc:
+                # Capture the message into a plain local NOW, not inside
+                # the lambda: Python implicitly deletes the "as exc" name
+                # at the end of an except block (to avoid a traceback
+                # reference cycle), but self.after(0, ...) only calls
+                # this lambda later, on the main thread - by then `exc`
+                # is already unbound, and referencing it would raise
+                # "cannot access free variable 'exc'" instead of showing
+                # the actual error to the user. Confirmed directly: this
+                # is exactly what happened before capturing the message
+                # as its own variable here.
+                message = str(exc)
+                self.after(0, lambda: self._on_ytdlp_update_failure(message))
+            except Exception as exc:
+                message = f"An unexpected error occurred: {exc}"
+                self.after(0, lambda: self._on_ytdlp_update_failure(message))
+
+        threading.Thread(target=do_update, daemon=True).start()
+
+    def _on_ytdlp_update_success(self, info):
+        if self.update_notice_frame is None:
+            return  # dialog/window already gone
+        self._update_notice_label.configure(
+            text=(
+                f"yt-dlp {info.latest_version} downloaded and verified. "
+                "Restart LoopClip to start using it."
+            ),
+            text_color="#3FB950",
+        )
+        self._update_now_btn.destroy()
+        self._update_skip_btn.configure(state="normal", text="Dismiss")
+        self._update_skip_btn.configure(
+            command=lambda: (self.update_notice_frame.destroy(), setattr(self, "update_notice_frame", None))
+        )
+
+    def _on_ytdlp_update_failure(self, message: str):
+        if self.update_notice_frame is not None:
+            self.update_notice_frame.destroy()
+            self.update_notice_frame = None
+        messagebox.showerror(
+            "yt-dlp update failed",
+            f"Could not update yt-dlp:\n\n{message}\n\n"
+            "LoopClip will keep working normally with the current version.",
+        )
 
     # ------------------------------------------------------------------ UI
 
