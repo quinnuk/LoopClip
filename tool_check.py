@@ -7,6 +7,7 @@ instead of failing with a cryptic error. Also provides the diagnostic
 info shown in the GUI's About dialog (ffmpeg version, NVENC availability).
 """
 
+import re
 import subprocess
 import sys
 import shutil
@@ -78,7 +79,14 @@ def check_nvenc() -> tuple[bool, str]:
 
     Returns (available, status_message) - status_message is meant to be
     shown directly to the user (e.g. in the About dialog), so it's a full
-    sentence rather than a code.
+    sentence rather than a code. On failure, includes a short excerpt of
+    FFmpeg's actual stderr (e.g. "Driver does not support the required
+    nvenc API version" for an outdated driver, vs "no capable devices
+    found" for no GPU at all) rather than a generic message that can't
+    distinguish between genuinely different problems - a fixed generic
+    message previously made it impossible to tell a real, fixable driver
+    issue apart from "no NVIDIA GPU present at all" on hardware that
+    does support NVENC.
     """
     if not check_ffmpeg():
         return False, "Could not be tested - FFmpeg was not found"
@@ -94,7 +102,22 @@ def check_nvenc() -> tuple[bool, str]:
         )
         if result.returncode == 0:
             return True, "Available"
-        return False, "Not available (no compatible NVIDIA GPU/driver detected) - using CPU encoding"
+
+        # Find the actual encoder-specific diagnostic line rather than
+        # just the last line of stderr - confirmed directly that the
+        # real root cause (e.g. "Cannot load libcuda.so.1", or on
+        # Windows typically "Cannot load nvEncodeAPI64.dll" / "Driver
+        # does not support the required nvenc API version") is usually
+        # one of the FIRST lines, while the last line is just a generic
+        # downstream symptom ("Nothing was written into output file...")
+        # that's true regardless of what actually went wrong upstream.
+        lines = [l for l in (result.stderr or "").strip().splitlines() if l.strip()]
+        nvenc_lines = [l for l in lines if "nvenc" in l.lower() or "cuda" in l.lower()]
+        detail_text = (nvenc_lines[0] if nvenc_lines else (lines[0] if lines else "no further detail from FFmpeg"))
+        # Trim the "[hevc_nvenc @ 0x...]" prefix ffmpeg adds - it's just
+        # an internal pointer address, not useful to a person reading this.
+        detail_text = re.sub(r"^\[[^\]]*\]\s*", "", detail_text)
+        return False, f"Not available ({detail_text}) - using CPU encoding"
     except (subprocess.TimeoutExpired, OSError):
         return False, "Could not be tested - using CPU encoding"
 

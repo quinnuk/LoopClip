@@ -38,6 +38,9 @@ DEFAULTS = {
     "delete_original": True,
     "open_folder_when_finished": True,
     "last_url": "",
+
+    "auto_check_ytdlp_updates": True,
+    "skipped_ytdlp_version": "",  # version the user explicitly declined - don't re-nag for it
 }
 
 
