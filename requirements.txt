@@ -1,9 +1,6 @@
-# Existing LoopClip dependencies
-customtkinter>=5.2
-yt-dlp>=2026.1.1
-pyperclip>=1.8
-
-# Added for LoopyCut-style automatic loop detection (loop_detector.py)
-opencv-python-headless>=4.9   # headless: no GUI backend needed, avoids extra Qt/GTK bloat in the built .exe
-numpy>=1.26
-scikit-image>=0.22   # enables the "ssim" and "combined" methods; optional (auto-falls back to hash if absent)
+customtkinter>=5.2.2
+yt-dlp>=2024.8.6
+pyperclip>=1.8.2
+pyinstaller>=6.10.0
+Pillow>=10.0.0
+tkinterdnd2>=0.3.0

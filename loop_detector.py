@@ -16,10 +16,29 @@ Methods (matching LoopyCut's naming):
   "combined"   - weighted SSIM + histogram blend (default, matches
                  LoopyCut's default method).
 
-CPU-only. LoopyCut's GPU acceleration path targets Apple Silicon via
-Numba, which doesn't apply here - a CUDA-accelerated backend (cupy/torch)
-could be added later for very long videos by swapping out the similarity
-functions below; every call site already goes through _SIMILARITY_FUNCS.
+CPU by default, with an optional GPU path (see "GPU acceleration" below).
+LoopyCut's own GPU path targets Apple Silicon via Numba, which doesn't
+apply here.
+
+GPU acceleration
+-----------------
+An optional CuPy-backed path speeds up the coarse hash-similarity-matrix
+comparison (_hash_similarity_matrix) when a CUDA GPU and CuPy are both
+available, falling back silently to the existing NumPy/CPU version
+otherwise - same NVENC-first/CPU-fallback pattern used elsewhere in this
+app.
+
+Worth being upfront about what this does and doesn't help with: thanks
+to the coarse-then-refine search strategy described below, the pairwise
+comparison stage is already capped at a small, fixed size (at most
+_MAX_COARSE_FRAMES frames), so it's already fast on CPU - a few hundred
+milliseconds at most, regardless of clip length. This GPU path mainly
+helps if _MAX_COARSE_FRAMES is raised for higher-precision searches in
+the future, or on a machine with an unusually slow CPU. It does NOT
+speed up frame *extraction* (extract_frames, i.e. decoding the video) -
+that's the actual dominant cost for long videos, and accelerating it
+would mean hardware video decode (NVDEC), a separate and larger change
+from this one.
 
 Search strategy
 ----------------
@@ -60,6 +79,19 @@ try:
     HAS_SKIMAGE = True
 except ImportError:
     HAS_SKIMAGE = False
+
+try:
+    import cupy as _cp
+    # Actually exercise the GPU once at import time rather than just
+    # checking that the cupy package imports - a machine with cupy pip
+    # installed but no working CUDA driver/GPU raises here, and that
+    # failure needs to be caught now (turning GPU support off cleanly)
+    # rather than surfacing partway through a real analysis run.
+    _cp.array([0])
+    HAS_GPU = True
+except Exception:
+    _cp = None
+    HAS_GPU = False
 
 METHODS = ("combined", "ssim", "histogram", "hash")
 ANALYSIS_MAX_DIM = 480  # frames are downscaled to this max dimension before comparison
@@ -178,13 +210,29 @@ def _hash_similarity(a: _Frame, b: _Frame) -> float:
     return 1.0 - (dist / a.hash_bits.size)
 
 
-def _hash_similarity_matrix(frames_a: List[_Frame], frames_b: List[_Frame]) -> np.ndarray:
+def _hash_similarity_matrix(
+    frames_a: List[_Frame], frames_b: List[_Frame], gpu: bool = False,
+) -> np.ndarray:
     """
     Vectorized Hamming-similarity matrix between two (small) frame lists,
     shaped (len(frames_a), len(frames_b)). Only ever called on frame lists
     capped to a few hundred frames at most, so the full matrix stays cheap
-    in both time and memory.
+    in both time and memory even on CPU (see the module docstring's "GPU
+    acceleration" section for why this rarely needs to be fast in the
+    first place).
+
+    gpu=True runs the same computation via CuPy (NumPy's GPU-array
+    equivalent) instead of NumPy, transferring the small hash arrays to
+    the GPU and the result back - only actually used when HAS_GPU is
+    True; silently falls back to the CPU/NumPy path otherwise.
     """
+    if gpu and HAS_GPU:
+        bits_a = _cp.stack([_cp.asarray(f.hash_bits) for f in frames_a])
+        bits_b = _cp.stack([_cp.asarray(f.hash_bits) for f in frames_b])
+        hamming = _cp.count_nonzero(bits_a[:, None, :] != bits_b[None, :, :], axis=2)
+        result = 1.0 - (hamming / bits_a.shape[1])
+        return _cp.asnumpy(result)
+
     bits_a = np.stack([f.hash_bits for f in frames_a])
     bits_b = np.stack([f.hash_bits for f in frames_b])
     hamming = np.count_nonzero(bits_a[:, None, :] != bits_b[None, :, :], axis=2)
@@ -271,6 +319,7 @@ def find_loop_candidates(
     max_candidates: int = 5,
     progress_callback: Optional[Callable[[int, int], None]] = None,
     stats: Optional[dict] = None,
+    gpu: bool = False,
 ) -> List[LoopCandidate]:
     """
     Finds the best-scoring non-overlapping (start, end) loop pairs within
@@ -335,7 +384,7 @@ def find_loop_candidates(
             stats["best_similarity"] = 0.0
         return []
 
-    coarse_hash_sim = _hash_similarity_matrix(coarse_frames, coarse_frames)
+    coarse_hash_sim = _hash_similarity_matrix(coarse_frames, coarse_frames, gpu=gpu)
     shortlist_mask = valid & (coarse_hash_sim >= prefilter_threshold)
     shortlist_idx = np.argwhere(shortlist_mask)
     if shortlist_idx.size == 0:
@@ -422,6 +471,7 @@ def find_best_loop(
     downsample: int = 1,
     max_dim: int = ANALYSIS_MAX_DIM,
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    gpu: bool = False,
 ) -> LoopCandidate:
     """
     High-level entry point: extracts frames, finds candidates, returns the
@@ -429,6 +479,10 @@ def find_best_loop(
     similarity threshold - same "no loops found" case LoopyCut's README
     troubleshooting section covers (lower --similarity, try another
     --method, or widen the search window).
+
+    gpu=True opts into the optional GPU-accelerated path described in
+    this module's docstring, when available - has no effect (silently
+    uses CPU) if HAS_GPU is False.
     """
     frames = extract_frames(
         video_path, start=start, stop=stop, downsample=downsample, max_dim=max_dim,
@@ -440,6 +494,7 @@ def find_best_loop(
         min_loop_seconds=min_loop_seconds, max_loop_seconds=max_loop_seconds,
         progress_callback=(lambda i, n: progress_callback("compare", i, n)) if progress_callback else None,
         stats=stats,
+        gpu=gpu,
     )
     if not candidates:
         best_similarity = stats.get("best_similarity", 0.0)
