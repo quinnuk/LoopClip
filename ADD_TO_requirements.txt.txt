@@ -1,0 +1,15 @@
+Add this one line to your existing requirements.txt:
+
+tkinterdnd2
+
+That's the only new required dependency (for drag-and-drop). It's a
+small, pure add-on package - no compiled/binary hassle on Windows.
+
+The GPU-accelerated analysis feature is OPTIONAL and needs no entry
+here: if a user doesn't have `cupy` installed, or has no compatible
+CUDA GPU, the checkbox just stays greyed out and everything else works
+exactly as before. Don't add cupy to requirements.txt itself, since
+it's a large, hardware-specific install that most users won't need -
+if you want to offer it, mention it as an optional extra in the README
+instead (something like "pip install cupy-cuda12x for optional
+GPU-accelerated analysis, if you have an NVIDIA GPU").
