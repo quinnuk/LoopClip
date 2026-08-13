@@ -1571,6 +1571,26 @@ class LoopClipApp(ctk.CTk):
             self._queue_refresh_scheduled = True
             self.after(int((min_interval - elapsed) * 1000), self._maybe_refresh_queue_display)
 
+    def _destroy_row_frame(self, frame):
+        """
+        Deferred by one event-loop tick rather than frame.destroy()
+        directly - matches the fix already established for the Help
+        dialog's Close button (see that commit for the full story): a
+        CTkScrollableFrame's row containing widgets like CTkProgressBar/
+        CTkLabel, destroyed synchronously during a frequent refresh
+        cycle, can hit the same CustomTkinter-internal timing bug where
+        some widget's deferred internal redraw callback is still pending
+        when the frame gets torn down, and fires afterward against an
+        already-destroyed canvas ("invalid command name ...canvas").
+
+        Confirmed as a genuine (if intermittent - it didn't reproduce in
+        isolated test runs, only under full-test-suite timing/load)
+        crash, not just a theoretical risk: this method exists because a
+        real crash was caught here, in exactly the queue list refresh
+        path that runs several times a second during active downloads.
+        """
+        frame.after(50, frame.destroy)
+
     def _refresh_queue_display(self):
         items = self.queue_manager.items
         if not hasattr(self, "_queue_rows"):
@@ -1578,7 +1598,7 @@ class LoopClipApp(ctk.CTk):
 
         if not items:
             for row in self._queue_rows.values():
-                row["frame"].destroy()
+                self._destroy_row_frame(row["frame"])
             self._queue_rows.clear()
             if not self.empty_queue_label.winfo_exists():
                 self.empty_queue_label = ctk.CTkLabel(
@@ -1593,7 +1613,7 @@ class LoopClipApp(ctk.CTk):
             # Drop rows for items no longer in the queue (e.g. after "Clear Completed").
             for stale_id in list(self._queue_rows.keys()):
                 if stale_id not in current_ids:
-                    self._queue_rows.pop(stale_id)["frame"].destroy()
+                    self._destroy_row_frame(self._queue_rows.pop(stale_id)["frame"])
 
             for idx, item in enumerate(items, start=1):
                 if item.id not in self._queue_rows:

@@ -198,3 +198,117 @@ app.mainloop()
 '''
     result = _run_gui_script(script, tmp_path)
     assert "tip_never_shown=True" in result.stdout, f"{result.stdout}\n{result.stderr}"
+
+
+@requires_display
+def test_queue_list_row_add_remove_clear_does_not_crash(tmp_path):
+    """
+    Investigative test prompted by a real bug found elsewhere (the Help
+    dialog: destroying a CTkToplevel containing a CTkTextbox synchronously
+    inside its own button's click handler intermittently crashed with
+    'invalid command name' - see the Help-dialog commit for the full
+    story). The queue list also uses a scrollbar-family widget
+    (CTkScrollableFrame) and destroys/recreates its row frames on every
+    refresh, so it was worth checking for the same class of bug.
+
+    Verdict from testing this directly (not just reasoning about it): a
+    real, genuine crash WAS found here - it didn't reproduce in early
+    isolated test runs, only under full-test-suite timing/load, which is
+    exactly the non-deterministic signature this whole bug category has
+    (same as the Help dialog's version of it). Fixed the same way:
+    _destroy_row_frame() defers frame.destroy() by one event-loop tick
+    instead of destroying synchronously inside the refresh cycle that
+    runs several times a second during active downloads.
+
+    This test exercises the fix under deliberately heavy, adversarial
+    load - many rounds of rapid add/clear/partial-remove cycles with
+    zero delay between them - specifically because the original crash
+    only showed up under load, not in a single relaxed pass.
+    """
+    script = '''
+import sys, threading, time
+sys.path.insert(0, ".")
+import main
+from queue_manager import QueueItem, QueueState
+
+app = main.LoopClipApp()
+
+errors = []
+def report_callback_exception(self, exc, val, tb):
+    errors.append(str(val))
+main.LoopClipApp.report_callback_exception = report_callback_exception
+
+def make_item(state, title):
+    return QueueItem(
+        url="https://youtu.be/fake", quality="best", no_audio=False,
+        audio_bitrate="original", video_bitrate="15",
+        auto_loop=True, loop_method="combined", similarity=98.0,
+        search_start="00:00:00", search_stop="", downsample=1,
+        min_loop_seconds=None, max_loop_seconds=None,
+        output_folder="C:\\\\fake", delete_original=False,
+        seamless_loop=False, crossfade_seconds="3",
+        state=state, title=title,
+    )
+
+def find_button_in(widget, text):
+    for child in widget.winfo_children():
+        try:
+            if child.cget("text") == text:
+                return child
+        except Exception:
+            pass
+        found = find_button_in(child, text)
+        if found:
+            return found
+    return None
+
+def do_test():
+    time.sleep(0.3)
+
+    # A normal, realistic pass first: click a real rows own button.
+    for it in [make_item(QueueState.QUEUED, f"Item {i}") for i in range(5)]:
+        app.queue_manager.items.append(it)
+    app._refresh_queue_display()
+    app.update()
+    remove_btn = find_button_in(app.queue_frame, "Remove")
+    if remove_btn:
+        remove_btn.invoke()
+    app._refresh_queue_display()
+    app.update()
+
+    # Then deliberately heavy, adversarial load: many rounds of rapid
+    # add/clear/partial-remove cycles with zero delay between them -
+    # this is the specific condition that reproduced the original crash.
+    for round_num in range(30):
+        for i in range(8):
+            app.queue_manager.items.append(make_item(QueueState.QUEUED, f"R{round_num}-{i}"))
+        app._refresh_queue_display()
+        app.queue_manager.items.clear()
+        app._refresh_queue_display()
+        for i in range(8):
+            app.queue_manager.items.append(make_item(QueueState.QUEUED, f"R{round_num}b-{i}"))
+        app._refresh_queue_display()
+        while len(app.queue_manager.items) > 3:
+            app.queue_manager.items.pop()
+            app._refresh_queue_display()
+
+    app.update()
+    time.sleep(1.0)  # let any deferred (.after(50, ...)) destroys actually fire
+    app.update()
+    app.queue_manager.items.clear()
+    app._refresh_queue_display()
+    time.sleep(0.5)
+    app.update()
+
+    app.quit()
+    print("RESULT|||done")
+
+threading.Thread(target=do_test, daemon=True).start()
+app.mainloop()
+
+if errors:
+    print("ERRORS:" + "; ".join(errors))
+'''
+    result = _run_gui_script(script, tmp_path, timeout=60)
+    assert "ERRORS:" not in result.stdout, f"{result.stdout}\n{result.stderr}"
+    assert "RESULT|||done" in result.stdout, f"{result.stdout}\n{result.stderr}"
