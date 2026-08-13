@@ -1,158 +1,86 @@
-"""
-downloader.py
--------------
-Wraps yt-dlp to download the best-available video, preferring 4K/HDR/60fps,
-while allowing the user to fall back to a more compatible format.
-
-Uses yt-dlp as a Python library (the same reliable approach as the
-single-download version of this app) rather than shelling out to a
-separate process - that's simpler and avoids environment mismatches
-between the running app and a spawned child process (e.g. when launched
-via pythonw.exe for a silent start).
-
-Cancellation is handled through yt-dlp's own progress_hooks: yt-dlp calls
-the hook many times per second while downloading, so raising
-KeyboardInterrupt from inside it (a technique yt-dlp explicitly supports
-for exactly this purpose) stops the download almost immediately.
-"""
+"""Small yt-dlp wrapper used by the desktop application."""
 
 import re
+import threading
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import yt_dlp
 
-YOUTUBE_URL_RE = re.compile(
-    r"^(https?://)?(www\.|m\.)?"
-    r"(youtube\.com/(watch\?(?:.*&)?v=[\w\-]+|shorts/[\w\-]+|live/[\w\-]+)"
-    r"|youtu\.be/[\w\-]+)",
-    re.IGNORECASE,
-)
+import tool_check
 
-# Playlist and channel URLs - a distinct shape from a single-video URL
-# above. These need to be *expanded* into individual video URLs (via
-# expand_collection_urls below) before they can be queued, rather than
-# downloaded directly.
-YOUTUBE_COLLECTION_RE = re.compile(
-    r"^(https?://)?(www\.|m\.)?youtube\.com/"
-    r"(playlist\?(?:.*&)?list=[\w\-]+"
-    r"|channel/[\w\-]+"
-    r"|@[\w\-.]+"
-    r"|c/[\w\-]+"
-    r"|user/[\w\-]+)",
-    re.IGNORECASE,
-)
-# A plain video URL can also carry a &list= param (e.g. a video opened
-# from within a playlist) - that's still a single video, not a collection,
-# so it's deliberately excluded from YOUTUBE_COLLECTION_RE above.
+URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 
-
-class CancelledError(Exception):
-    """Raised when a download is aborted because the user pressed Cancel."""
-
-
-def is_valid_youtube_url(url: str) -> bool:
-    """Basic validation for a YouTube video URL."""
-    if not url:
-        return False
-    return bool(YOUTUBE_URL_RE.match(url.strip()))
-
-
-def is_youtube_collection_url(url: str) -> bool:
-    """Whether `url` looks like a playlist or channel link (something that
-    expands into many videos) rather than a single video."""
-    if not url:
-        return False
-    return bool(YOUTUBE_COLLECTION_RE.match(url.strip()))
-
-
-def expand_collection_urls(
-    url: str,
-    progress_callback: Optional[Callable[[int, int], None]] = None,
-) -> list:
-    """
-    Given a playlist or channel URL, returns a list of individual video
-    URLs it contains, without downloading any of them.
-
-    Uses yt-dlp's "flat" extraction mode (extract_flat="in_playlist"),
-    which just lists each entry's id/title rather than resolving full
-    format info for every video - this is what keeps expanding even a
-    large channel reasonably fast, since it's a metadata listing, not a
-    per-video lookup.
-
-    progress_callback, if given, is called as (count_so_far, 0) as
-    entries are discovered - the total isn't known ahead of time for a
-    channel, so the second argument is always 0 (caller should treat this
-    as "still discovering" rather than a real fraction).
-    """
-    ydl_opts = {
-        "extract_flat": "in_playlist",
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-    }
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(
-            f"Could not read this playlist/channel: {exc}"
-        ) from exc
-
-    entries = info.get("entries") or []
-    urls = []
-    for entry in entries:
-        if not entry:
-            continue
-        # Flat extraction gives back either a full "url" already, or just
-        # an "id" to build one from - handle both, preferring whichever
-        # is actually present.
-        video_url = entry.get("url")
-        if not video_url and entry.get("id"):
-            video_url = f"https://www.youtube.com/watch?v={entry['id']}"
-        if video_url and is_valid_youtube_url(video_url):
-            urls.append(video_url)
-            if progress_callback is not None:
-                progress_callback(len(urls), 0)
-
-    if not urls:
-        raise RuntimeError(
-            "No videos were found at this playlist/channel link "
-            "(it may be empty, private, or the link may be wrong)."
-        )
-    return urls
-
-
-# Format strings per quality mode, with and without an audio stream.
-# "best": true best-available, any codec (AV1/VP9/H.264), 4K/HDR/60fps welcome.
-# "4k_hdr": explicitly prefer 4K + HDR, falling back gracefully.
-# "1080p": capped at 1080p, prefer H.264 for broad compatibility.
 FORMAT_SELECTORS = {
     "best": "bestvideo+bestaudio/best",
-    "4k_hdr": (
-        "bestvideo[height<=2160][vcodec^=vp09.02]+bestaudio/"
-        "bestvideo[height<=2160][vcodec^=av01][dynamic_range=HDR]+bestaudio/"
-        "bestvideo[height<=2160]+bestaudio/best"
-    ),
-    "1080p": (
-        "bestvideo[height<=1080][ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/"
-        "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
-    ),
+    "2160p": "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best",
+    "1440p": "bestvideo[height<=1440]+bestaudio/best[height<=1440]/best",
+    "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+    "720p": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+    "480p": "bestvideo[height<=480]+bestaudio/best[height<=480]/best",
+    "360p": "bestvideo[height<=360]+bestaudio/best[height<=360]/best",
+    "audio_only": "bestaudio/best",
 }
 
-FORMAT_SELECTORS_NO_AUDIO = {
-    "best": "bestvideo/best",
-    "4k_hdr": (
-        "bestvideo[height<=2160][vcodec^=vp09.02]/"
-        "bestvideo[height<=2160][vcodec^=av01][dynamic_range=HDR]/"
-        "bestvideo[height<=2160]/best"
-    ),
-    "1080p": (
-        "bestvideo[height<=1080][ext=mp4][vcodec^=avc1]/"
-        "bestvideo[height<=1080]/best[height<=1080]"
-    ),
+# Container ("format") the final video is remuxed into. None means "Best
+# Available": don't force a container at all, so yt-dlp keeps whatever
+# native container avoids a re-encode for that particular source.
+CONTAINER_FORMATS = {
+    "best": None,
+    "mp4": "mp4",
+    "mkv": "mkv",
+    "webm": "webm",
 }
+
+# Query-string keys that don't change which video a URL points at. Stripping
+# these lets "example.com/video/123" and "example.com/video/123?utm_source=x"
+# be recognised as the same video for duplicate detection.
+TRACKING_PARAMS = {
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "si", "feature", "fbclid", "gclid", "igshid", "ref", "ref_src",
+    "ref_url", "spm", "context", "app",
+}
+
+# Windows-only long-path signals (WinError 3 = path not found because it's
+# too long, WinError 206 = filename or extension too long).
+_LONG_PATH_MARKERS = ("winerror 3", "winerror 206", "too long", "filename too long")
+
+
+class DownloadCancelled(Exception):
+    """Raised when the user abandons a download: the partial file is removed."""
+
+
+class DownloadPaused(Exception):
+    """Raised when the user pauses a download: the partial file is kept."""
+
+
+class DownloadControl:
+    """Coordinates pause/cancel requests between the UI thread and the
+    background download thread for whichever item is currently downloading.
+    """
+
+    def __init__(self):
+        self._pause = threading.Event()
+        self._cancel = threading.Event()
+        self.current_filename: str | None = None
+
+    def request_pause(self) -> None:
+        self._pause.set()
+
+    def request_cancel(self) -> None:
+        self._cancel.set()
+
+    def is_pause_requested(self) -> bool:
+        return self._pause.is_set()
+
+    def is_cancel_requested(self) -> bool:
+        return self._cancel.is_set()
+
+    def reset(self) -> None:
+        self._pause.clear()
+        self._cancel.clear()
+        self.current_filename = None
 
 
 class DownloadResult:
@@ -161,129 +89,277 @@ class DownloadResult:
         self.title = title
 
 
-def get_installed_version() -> str:
-    """The installed yt-dlp version string, e.g. '2026.07.04'."""
-    return yt_dlp.version.__version__
+def is_valid_url(url: str) -> bool:
+    return bool(url) and bool(URL_RE.match(url.strip()))
+
+
+def normalize_url(url: str) -> str:
+    """Canonical form of a URL for duplicate detection: strips tracking
+    query parameters, a leading "www.", and any trailing slash, and sorts
+    remaining query parameters so ordering doesn't matter either.
+    """
+    parts = urlsplit(url.strip())
+    kept_params = sorted(
+        (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+        if k.lower() not in TRACKING_PARAMS
+    )
+    netloc = parts.netloc.lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    path = parts.path.rstrip("/")
+    return urlunsplit((parts.scheme.lower(), netloc, path, urlencode(kept_params), ""))
+
+
+def classify_error(exc: Exception) -> tuple[str, str]:
+    """Turn a raw yt-dlp/OS exception into (short human reason, full detail)."""
+    detail = str(exc)
+    lowered = detail.lower()
+
+    if any(marker in lowered for marker in _LONG_PATH_MARKERS):
+        reason = "The destination file path is too long for Windows."
+    elif "private video" in lowered:
+        reason = "This video is private."
+    elif "sign in" in lowered or "login required" in lowered:
+        reason = "This video requires you to be signed in (login required)."
+    elif "age" in lowered and "restrict" in lowered:
+        reason = "This video is age-restricted."
+    elif "region" in lowered or "not available in your country" in lowered:
+        reason = "This video is not available in your region."
+    elif "unavailable" in lowered or "removed" in lowered:
+        reason = "This video is unavailable. It may have been removed or made private."
+    elif "requested format is not available" in lowered:
+        reason = "The requested format is not available for this video."
+    elif "429" in lowered or ("rate" in lowered and "limit" in lowered):
+        reason = "You're being rate-limited by the site. Try again in a few minutes."
+    elif isinstance(exc, (TimeoutError, ConnectionError)) or any(
+        term in lowered for term in ("timed out", "connection", "network")
+    ):
+        reason = "A network error occurred."
+    else:
+        reason = "The download failed."
+    return reason, detail
+
+
+def get_video_info(url: str, cookies_from_browser: str = "none") -> dict:
+    """Return lightweight information for the preview panel without downloading.
+
+    If the URL points at a playlist, returns {"is_playlist": True, "playlist_title": ...,
+    "entries": [{"url": ..., "title": ...}, ...]} using yt-dlp's flat extraction, which is
+    fast even for large playlists since it doesn't fetch full metadata per video.
+    Otherwise returns the usual single-video info shape with "is_playlist": False.
+
+    cookies_from_browser lets private/login-required videos be previewed using an
+    existing browser session ("chrome", "edge", "firefox", "brave") - "none" skips this.
+    """
+    probe_options = {
+        "noplaylist": False,
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": "in_playlist",
+    }
+    if cookies_from_browser and cookies_from_browser != "none":
+        probe_options["cookiesfrombrowser"] = (cookies_from_browser,)
+    with yt_dlp.YoutubeDL(probe_options) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    if info.get("_type") == "playlist" or "entries" in info:
+        entries = []
+        for entry in info.get("entries") or []:
+            if not entry:
+                continue
+            entry_url = entry.get("url") or entry.get("webpage_url")
+            if not entry_url:
+                continue
+            if not is_valid_url(entry_url):
+                # Flat extraction sometimes returns a bare video ID rather than a full
+                # URL for some sites; skip anything we can't turn into a real link.
+                continue
+            entries.append({
+                "url": entry_url,
+                "title": entry.get("title") or entry.get("id") or "Video",
+            })
+        return {
+            "is_playlist": True,
+            "playlist_title": info.get("title") or "Playlist",
+            "entries": entries,
+        }
+
+    return {
+        "is_playlist": False,
+        "title": info.get("title", "Video"),
+        "uploader": info.get("uploader") or info.get("channel"),
+        "duration": info.get("duration"),
+        "thumbnail": info.get("thumbnail"),
+    }
 
 
 def download_video(
     url: str,
-    temp_dir: str,
+    output_dir: str,
     quality: str,
-    no_audio: bool = False,
-    section_range_seconds: Optional[tuple] = None,
     progress_callback: Optional[Callable[[dict], None]] = None,
-    process_holder: Optional[dict] = None,
-    cancel_check: Optional[Callable[[], bool]] = None,
+    include_audio: bool = True,
+    keep_original: bool = False,
+    duplicate_mode: str = "Rename automatically",
+    control: Optional[DownloadControl] = None,
+    duplicate_callback: Optional[Callable[[str], str]] = None,
+    audio_bitrate: str = "192",
+    format_container: str = "best",
+    subtitle_mode: str = "none",
+    embed_subs: bool = False,
+    speed_limit_bytes: Optional[int] = None,
+    retry_attempts: int = 3,
+    retry_delay: int = 5,
+    cookies_from_browser: str = "none",
 ) -> DownloadResult:
+    """Download one item, optionally without sound, and report its progress.
+
+    Pause vs. cancel: if `control.request_pause()` was called, the progress
+    hook raises DownloadPaused and the partial file (.part) is left in place
+    so a later call with the same url/output_dir/quality can resume it. If
+    `control.request_cancel()` was called instead, the hook raises
+    DownloadCancelled; the caller is expected to remove the partial file
+    since the download has been abandoned rather than paused.
     """
-    Downloads the given YouTube URL into temp_dir using the selected
-    quality mode. Returns the path (and title) of the downloaded file.
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    is_audio = quality == "audio_only"
+    video_only = not is_audio and not include_audio
+    format_selector = (
+        "bestvideo[ext=mp4]/bestvideo" if video_only
+        else FORMAT_SELECTORS.get(quality, FORMAT_SELECTORS["best"])
+    )
 
-    section_range_seconds, if given, is a (start_seconds, end_seconds)
-    tuple - only that portion of the video is downloaded (via yt-dlp's
-    download_sections), instead of the whole thing. This is what makes
-    trimming a few minutes out of a multi-hour video fast: yt-dlp only
-    fetches the needed range from YouTube's servers rather than the full
-    video, and force_keyframes_at_cuts asks it to re-mux for a clean cut
-    at those boundaries. The caller is expected to pass a slightly padded
-    range (a bit before/after the actual desired trim points) so the
-    existing local FFmpeg trim step afterward still has enough margin to
-    make a frame-accurate final cut.
-
-    progress_callback receives a dict with keys like:
-      status ('downloading' | 'finished')
-      percent (float, 0-100) - when known
-      speed (str) - human readable, e.g. "4.2 MB/s"
-      eta (str) - human readable, e.g. "00:42"
-
-    process_holder is accepted for API symmetry with processor.process_video
-    (which does use it, for its FFmpeg subprocess) but isn't used here -
-    there's no separate OS process to hold a handle to.
-
-    cancel_check, if given, is polled from inside yt-dlp's own progress
-    hook (called many times per second while downloading); if it returns
-    True, CancelledError is raised almost immediately.
-    """
-    Path(temp_dir).mkdir(parents=True, exist_ok=True)
-
-    selectors = FORMAT_SELECTORS_NO_AUDIO if no_audio else FORMAT_SELECTORS
-    fmt = selectors.get(quality, selectors["best"])
-
-    def hook(d):
-        if cancel_check is not None and cancel_check():
-            # yt-dlp explicitly supports cancelling a download by raising
-            # KeyboardInterrupt from inside a progress hook.
-            raise KeyboardInterrupt()
-
+    def hook(data):
+        filename = data.get("filename")
+        if filename and control is not None:
+            control.current_filename = filename
+        if control is not None and control.is_cancel_requested():
+            raise DownloadCancelled()
+        if control is not None and control.is_pause_requested():
+            raise DownloadPaused()
         if progress_callback is None:
             return
-
-        if d["status"] == "downloading":
-            total = d.get("total_bytes") or d.get("total_bytes_estimate")
-            downloaded = d.get("downloaded_bytes", 0)
+        if data["status"] == "downloading":
+            total = data.get("total_bytes") or data.get("total_bytes_estimate")
+            downloaded = data.get("downloaded_bytes", 0)
             percent = (downloaded / total * 100) if total else None
-            speed = d.get("speed")
-            eta = d.get("eta")
-            eta_int = int(eta) if eta else None
+            speed = data.get("speed")
+            eta = data.get("eta")
             progress_callback({
-                "status": "downloading",
-                "percent": percent,
+                "status": "downloading", "percent": percent,
                 "speed": f"{speed / 1024 / 1024:.1f} MB/s" if speed else "-",
-                "eta": f"{eta_int // 60:02d}:{eta_int % 60:02d}" if eta_int else "-",
+                "eta": f"{eta // 60:02d}:{eta % 60:02d}" if eta else "-",
             })
-        elif d["status"] == "finished":
+        elif data["status"] == "finished":
             progress_callback({"status": "finished", "percent": 100.0})
 
+    output_template = str(Path(output_dir) / "%(title)s.%(ext)s")
+    if duplicate_mode == "Ask me":
+        probe_options = {"outtmpl": output_template, "noplaylist": True, "quiet": True, "no_warnings": True}
+        if cookies_from_browser and cookies_from_browser != "none":
+            probe_options["cookiesfrombrowser"] = (cookies_from_browser,)
+        with yt_dlp.YoutubeDL(probe_options) as probe:
+            probe_info = probe.extract_info(url, download=False)
+            existing_path = Path(probe.prepare_filename(probe_info))
+        if is_audio:
+            existing_path = existing_path.with_suffix(".mp3")
+        if existing_path.exists():
+            action = duplicate_callback(str(existing_path)) if duplicate_callback else "skip"
+            if action == "skip":
+                raise FileExistsError(f"Skipped because this file already exists: {existing_path.name}")
+            duplicate_mode = "Overwrite" if action == "overwrite" else "Rename automatically"
+
     ydl_opts = {
-        "format": fmt,
-        "merge_output_format": "mp4",
-        "outtmpl": str(Path(temp_dir) / "%(title)s.%(ext)s"),
+        "format": format_selector,
+        "outtmpl": output_template,
         "progress_hooks": [hook],
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        # Windows-safe filenames: strip characters like : ? * " < > | and
+        # reserved names (CON, NUL, ...), and cap component length so very
+        # long titles don't blow past Windows' path-length limits.
+        "windowsfilenames": True,
+        "trim_file_name": 150,
+        # Resume partial downloads (the default, made explicit) and keep the
+        # .part file on disk rather than deleting it, so a paused download
+        # can be resumed instead of restarting from zero.
+        "continuedl": True,
+        "nopart": False,
+        # Network resilience: retry transient failures a fixed number of
+        # times with a fixed delay; permanent errors (private video, 404,
+        # unsupported site) are raised by yt-dlp immediately without a retry.
+        "retries": retry_attempts,
+        "fragment_retries": retry_attempts,
+        "retry_sleep_functions": {
+            "http": lambda n, _d=retry_delay: _d,
+            "fragment": lambda n, _d=retry_delay: _d,
+        },
     }
+    if speed_limit_bytes:
+        ydl_opts["ratelimit"] = speed_limit_bytes
+    if cookies_from_browser and cookies_from_browser != "none":
+        # Reads cookies directly from the named browser's local profile via
+        # yt-dlp - we never read, display, log, or transmit the cookie data
+        # ourselves; only the browser name is ever stored or logged.
+        ydl_opts["cookiesfrombrowser"] = (cookies_from_browser,)
+    if duplicate_mode == "Rename automatically":
+        ydl_opts["outtmpl"] = str(Path(output_dir) / "%(title)s [%(id)s].%(ext)s")
+    elif duplicate_mode == "Overwrite":
+        ydl_opts["overwrites"] = True
+    else:
+        ydl_opts["nooverwrites"] = True
 
-    if section_range_seconds is not None:
-        start_s, end_s = section_range_seconds
-        ydl_opts["download_sections"] = [f"*{start_s}-{end_s}"]
-        # Asks yt-dlp to re-mux so the section boundaries land on clean
-        # cut points, rather than the nearest (possibly much earlier)
-        # keyframe - keeps the downloaded section tight to what was asked
-        # for instead of over-fetching.
-        ydl_opts["force_keyframes_at_cuts"] = True
+    ffmpeg_path = tool_check.find_ffmpeg()
+    if ffmpeg_path:
+        ydl_opts["ffmpeg_location"] = ffmpeg_path
+
+    if is_audio:
+        ydl_opts["postprocessors"] = [{
+            "key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": audio_bitrate,
+        }]
+        ydl_opts["keepvideo"] = keep_original
+    elif not video_only:
+        container = CONTAINER_FORMATS.get(format_container)
+        if container:
+            ydl_opts["merge_output_format"] = container
+        # "best" (None) leaves the container unforced so yt-dlp remuxes into
+        # whatever native container avoids re-encoding, rather than always
+        # transcoding to mp4.
+
+    # Subtitles only make sense for video downloads, not audio extraction.
+    if not is_audio and subtitle_mode != "none":
+        ydl_opts["writesubtitles"] = True
+        ydl_opts["subtitlesformat"] = "srt/best"
+        if subtitle_mode == "english":
+            ydl_opts["subtitleslangs"] = ["en"]
+        else:
+            ydl_opts["allsubtitles"] = True
+        if embed_subs:
+            ydl_opts.setdefault("postprocessors", []).append({"key": "FFmpegEmbedSubtitle"})
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-    except KeyboardInterrupt as exc:
-        raise CancelledError("Download cancelled by user.") from exc
-    except Exception as exc:  # noqa: BLE001
-        # A cancel can sometimes surface as a different exception once
-        # yt-dlp has wrapped/re-raised it internally - if we know a cancel
-        # was requested, treat it as one regardless of the exact type.
-        if cancel_check is not None and cancel_check():
-            raise CancelledError("Download cancelled by user.") from exc
-        raise RuntimeError(str(exc)) from exc
+            filepath = ydl.prepare_filename(info)
+    except OSError as exc:
+        message = str(exc).lower()
+        if getattr(exc, "winerror", None) in (3, 206) or any(m in message for m in _LONG_PATH_MARKERS):
+            raise OSError(
+                "The destination file path is too long for Windows. Try a "
+                "shorter output folder, or a shorter video title if possible."
+            ) from exc
+        raise
 
-    filepath = ydl.prepare_filename(info)
-    # merge_output_format may change the extension to .mp4
-    mp4_path = str(Path(filepath).with_suffix(".mp4"))
-    final_path = mp4_path if Path(mp4_path).exists() else filepath
+    if is_audio:
+        final_path = str(Path(filepath).with_suffix(".mp3"))
+    else:
+        container = CONTAINER_FORMATS.get(format_container)
+        if container:
+            forced_path = str(Path(filepath).with_suffix("." + container))
+            final_path = forced_path if Path(forced_path).exists() else filepath
+        else:
+            final_path = filepath
     if not Path(final_path).exists():
-        final_path = _guess_downloaded_file(temp_dir) or final_path
-
-    if not Path(final_path).exists():
-        raise RuntimeError("Could not locate the downloaded file.")
-
+        final_path = filepath
     return DownloadResult(filepath=final_path, title=info.get("title", "video"))
-
-
-def _guess_downloaded_file(temp_dir: str) -> Optional[str]:
-    """Fallback: pick the most recently modified file in temp_dir."""
-    candidates = [p for p in Path(temp_dir).glob("*") if p.is_file()]
-    if not candidates:
-        return None
-    newest = max(candidates, key=lambda p: p.stat().st_mtime)
-    return str(newest)
