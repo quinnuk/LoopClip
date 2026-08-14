@@ -2,7 +2,7 @@
 
 # LoopClip
 
-**Download YouTube videos and turn them into seamless, looping 4K screensavers ÔÇö automatically.**
+**Download YouTube videos and turn them into seamless, looping 4K screensavers — automatically.**
 
 ![Platform](https://img.shields.io/badge/platform-Windows%2011-0078D6)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
@@ -14,7 +14,7 @@
   <img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="60" width="217">
 </a>
 
-<sub>If LoopClip saves you time, a coffee is always appreciated Ôÿò</sub>
+<sub>If LoopClip saves you time, a coffee is always appreciated ☕</sub>
 
 </div>
 
@@ -22,7 +22,7 @@
 
 ## Overview
 
-LoopClip is a Windows desktop application for turning YouTube videos ÔÇö aquariums, aquascapes, fireplaces, rain, nature, or anything else ÔÇö into ready-to-use looping video clips.
+LoopClip is a Windows desktop application for turning YouTube videos — aquariums, aquascapes, fireplaces, rain, nature, or anything else — into ready-to-use looping video clips.
 
 It can download a source, automatically find a good loop point, trim the video, optionally crossfade the loop point, and encode when necessary. It is designed with 4K screensavers and ambient-display setups in mind, including Projectivy Launcher, but the resulting videos can be used anywhere a normal video file is supported.
 
@@ -44,9 +44,9 @@ LoopClip can also process local video files without downloading anything.
 
 ### Quality and encoding
 
-- **Best Available** ÔÇö lets yt-dlp choose the highest-quality video/audio streams available.
-- **4K HDR Preferred** ÔÇö favors an HDR-capable 4K stream when one is available.
-- **1080p Compatible** ÔÇö caps the selected download at 1080p for smaller files and broader compatibility.
+- **Best Available** — lets yt-dlp choose the highest-quality video/audio streams available.
+- **4K HDR Preferred** — favors an HDR-capable 4K stream when one is available.
+- **1080p Compatible** — caps the selected download at 1080p for smaller files and broader compatibility.
 - Stream-copy trimming is attempted first, avoiding a re-encode when the source allows a clean cut.
 - When re-encoding is necessary, LoopClip uses H.265/HEVC at a selectable bitrate:
   - 8 Mbps
@@ -68,16 +68,16 @@ LoopClip can search a video for two frames that make a good loop boundary, so yo
 
 Available comparison methods:
 
-- **Combined** ÔÇö combines structural and color matching; recommended for general use.
-- **SSIM** ÔÇö structural similarity; useful for relatively static footage.
-- **Histogram** ÔÇö color/lighting similarity; useful when subjects move but the overall scene remains similar.
-- **Hash** ÔÇö fast perceptual comparison; useful for quick tests and near-static footage.
+- **Combined** — combines structural and color matching; recommended for general use.
+- **SSIM** — structural similarity; useful for relatively static footage.
+- **Histogram** — color/lighting similarity; useful when subjects move but the overall scene remains similar.
+- **Hash** — fast perceptual comparison; useful for quick tests and near-static footage.
 
 Additional controls include:
 
-- **Similarity %** ÔÇö how close the candidate frames must be.
-- **Analyze** ÔÇö every frame, every 2nd, 4th, or 8th frame.
-- **Limit search window** ÔÇö restrict analysis to a From/To range.
+- **Similarity %** — how close the candidate frames must be.
+- **Analyze** — every frame, every 2nd, 4th, or 8th frame.
+- **Limit search window** — restrict analysis to a From/To range.
 - Optional minimum and maximum loop lengths.
 
 ### GPU-accelerated loop analysis
@@ -104,9 +104,9 @@ Crossfade requires a re-encode. If crossfade creation fails but the underlying t
 
 The GUI includes:
 
-- **Help** ÔÇö a scrollable explanation of the less-obvious settings.
-- **About** ÔÇö shows the LoopClip version, Python version, FFmpeg status/version, yt-dlp version, and NVENC status.
-- **Library** ÔÇö keeps a persistent record of completed videos, including their title, completion date, and output path.
+- **Help** — a scrollable explanation of the less-obvious settings.
+- **About** — shows the LoopClip version, Python version, FFmpeg status/version, yt-dlp version, and NVENC status.
+- **Library** — keeps a persistent record of completed videos, including their title, completion date, and output path.
 
 From the Library you can:
 
@@ -115,18 +115,20 @@ From the Library you can:
 
 Removing a Library entry does **not** delete the actual video file.
 
-### Automatic yt-dlp updates
+### yt-dlp updates
 
-LoopClip can check for a newer yt-dlp release when it starts.
+LoopClip can check for a newer yt-dlp release automatically when it starts, and you can also check on demand at any time.
 
-If an update is available, the GUI offers:
+**Automatic check (on startup):** if an update is available, the GUI shows an inline notice offering:
 
 - **Update Now**
 - **Skip**
 
-Updates are downloaded and applied in the background so the application remains usable. The downloaded package is verified before it is installed. A successfully applied update takes effect after restarting LoopClip.
+You can turn this automatic check off from the **About** dialog. If you skip a particular version, LoopClip remembers that exact version and will not repeatedly offer it; a newer version can still be offered later.
 
-You can turn automatic update checks off from the **About** dialog. If you skip a particular version, LoopClip remembers that exact version and will not repeatedly offer it; a newer version can still be offered later.
+**Manual check (on demand):** click **Check for Updates** in the header, next to Help and About, to check right away. Unlike the automatic check, this always reports a result — "you're up to date," an update available with a **Download & Install** button, or that PyPI couldn't be reached — so you can confirm the update mechanism is working without waiting for a real new release.
+
+Either way, updates are downloaded and applied in the background so the application remains usable, and the downloaded package is verified against its published checksum before it's installed. A successfully applied update takes effect after restarting LoopClip.
 
 ### Settings and quality of life
 
@@ -219,8 +221,8 @@ If you already have the required packages installed globally, you can skip the v
 
 After installing the dependencies, either of these launchers can be used:
 
-- **`LoopClip.vbs`** ÔÇö silent launch.
-- **`Run LoopClip.bat`** ÔÇö silent launch.
+- **`LoopClip.vbs`** — silent launch.
+- **`Run LoopClip.bat`** — silent launch.
 
 You can also run:
 
@@ -307,9 +309,9 @@ Auto-detect searches a selected portion of the source video for a suitable pair 
 
 Higher similarity values require a closer match.
 
-For relatively static footage, values around 95ÔÇô98% or higher may be reasonable.
+For relatively static footage, values around 95–98% or higher may be reasonable.
 
-For moving footage ÔÇö fish, foliage, water, people, etc. ÔÇö a lower threshold can produce much more realistic results. Histogram comparison can also be preferable because it is less sensitive to an object's exact position.
+For moving footage — fish, foliage, water, people, etc. — a lower threshold can produce much more realistic results. Histogram comparison can also be preferable because it is less sensitive to an object's exact position.
 
 If a search fails, the error reports the closest match it found. That value is useful when choosing the next similarity threshold.
 
@@ -332,7 +334,7 @@ Give the search enough room to find a match. A search window that is only barely
 
 ## Command-Line Interface
 
-`cli.py` provides the download ÔåÆ loop detection ÔåÆ encode workflow without the GUI.
+`cli.py` provides the download → loop detection → encode workflow without the GUI.
 
 The input can be:
 
@@ -386,7 +388,7 @@ python cli.py --help
 | `--version` | Print the LoopClip version and exit |
 | `--start` | Start of the loop-search window in `HH:MM:SS` |
 | `--stop` | End of the loop-search window in `HH:MM:SS` |
-| `--similarity` | Match threshold from 0ÔÇô100; default `98` |
+| `--similarity` | Match threshold from 0–100; default `98` |
 | `--method` | `combined`, `ssim`, `histogram`, or `hash` |
 | `--downsample` | Analyze every Nth frame; default `1` |
 | `--min-length` | Minimum loop length in seconds |
@@ -434,28 +436,28 @@ The standalone executable does not require Python, but FFmpeg remains an externa
 
 ```text
 LoopClip/
-Ôö£ÔöÇÔöÇ main.py                  # GUI, settings UI, queue orchestration, Help/About/Library
-Ôö£ÔöÇÔöÇ cli.py                   # Command-line download/analyze/encode workflow
-Ôö£ÔöÇÔöÇ downloader.py            # yt-dlp integration, URL handling, format selection and progress
-Ôö£ÔöÇÔöÇ processor.py             # FFmpeg trimming, encoding, crossfade and output verification
-Ôö£ÔöÇÔöÇ loop_detector.py         # Automatic loop detection and similarity methods
-Ôö£ÔöÇÔöÇ queue_manager.py         # Queue items, processing worker and state management
-Ôö£ÔöÇÔöÇ library.py               # Persistent completed-video Library
-Ôö£ÔöÇÔöÇ settings.py              # Persistent application settings
-Ôö£ÔöÇÔöÇ tool_check.py            # FFmpeg/yt-dlp checks and NVENC capability diagnostics
-Ôö£ÔöÇÔöÇ ytdlp_updater.py         # yt-dlp update checking, download, verification and installation
-Ôö£ÔöÇÔöÇ version.py               # Single source of truth for the LoopClip version
-Ôö£ÔöÇÔöÇ icon.ico                 # Application icon
-Ôö£ÔöÇÔöÇ screenshot.png           # README screenshot
-Ôö£ÔöÇÔöÇ LoopClip.spec            # PyInstaller configuration
-Ôö£ÔöÇÔöÇ build_exe.bat            # One-click executable build
-Ôö£ÔöÇÔöÇ LoopClip.vbs              # Silent launcher
-Ôö£ÔöÇÔöÇ Run LoopClip.bat         # Alternative silent launcher
-Ôö£ÔöÇÔöÇ cleanup.ps1               # Build/output cleanup helper
-Ôö£ÔöÇÔöÇ setup-issue-templates.ps1 # GitHub issue-template setup helper
-Ôö£ÔöÇÔöÇ requirements.txt         # Runtime dependencies
-Ôö£ÔöÇÔöÇ requirements-dev.txt     # Development/test dependencies
-ÔööÔöÇÔöÇ License.txt              # MIT license
+├── main.py                  # GUI, settings UI, queue orchestration, Help/About/Library
+├── cli.py                   # Command-line download/analyze/encode workflow
+├── downloader.py            # yt-dlp integration, URL handling, format selection and progress
+├── processor.py             # FFmpeg trimming, encoding, crossfade and output verification
+├── loop_detector.py         # Automatic loop detection and similarity methods
+├── queue_manager.py         # Queue items, processing worker and state management
+├── library.py               # Persistent completed-video Library
+├── settings.py              # Persistent application settings
+├── tool_check.py            # FFmpeg/yt-dlp checks and NVENC capability diagnostics
+├── ytdlp_updater.py         # yt-dlp update checking, download, verification and installation
+├── version.py               # Single source of truth for the LoopClip version
+├── icon.ico                 # Application icon
+├── screenshot.png           # README screenshot
+├── LoopClip.spec            # PyInstaller configuration
+├── build_exe.bat            # One-click executable build
+├── LoopClip.vbs              # Silent launcher
+├── Run LoopClip.bat         # Alternative silent launcher
+├── cleanup.ps1               # Build/output cleanup helper
+├── setup-issue-templates.ps1 # GitHub issue-template setup helper
+├── requirements.txt         # Runtime dependencies
+├── requirements-dev.txt     # Development/test dependencies
+└── License.txt              # MIT license
 ```
 
 ## Data and Settings
