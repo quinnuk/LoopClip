@@ -310,6 +310,42 @@ def _cleanup_old_versions(root: Path, keep_version: str) -> None:
         pass
 
 
+def check_status(current_version: str, timeout: float = 5.0) -> dict:
+    """
+    Like check_for_update(), but always reports what it found on PyPI -
+    even when there's no update, or the check itself failed - instead
+    of returning a bare None for every non-update outcome. check_for_update()
+    is deliberately silent in all three of those cases because the
+    startup auto-check should say nothing when there's nothing to
+    report; a manual, user-triggered "Check for yt-dlp Updates" action
+    needs to say *something* either way, so it uses this instead.
+
+    Returns a dict with:
+        "latest":     latest version string on PyPI, or None if it
+                       couldn't be reached at all
+        "up_to_date": True if current_version is already the latest
+                       (or newer)
+        "info":       an UpdateInfo (with a verified, downloadable wheel)
+                       if a newer version exists and one was found for
+                       it, else None - including when up_to_date is True
+    """
+    try:
+        req = urllib.request.Request(PYPI_URL, headers={"User-Agent": _USER_AGENT})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.load(resp)
+        latest = data["info"]["version"]
+    except Exception:
+        return {"latest": None, "up_to_date": False, "info": None}
+
+    if not is_newer(latest, current_version):
+        return {"latest": latest, "up_to_date": True, "info": None}
+
+    # There is a newer version - reuse check_for_update() to also locate
+    # and validate its wheel/checksum rather than duplicating that logic.
+    info = check_for_update(current_version, timeout=timeout)
+    return {"latest": latest, "up_to_date": False, "info": info}
+
+
 def activate_pending_override() -> Optional[str]:
     """
     Call once, at the very top of every entry point (main.py, cli.py) -

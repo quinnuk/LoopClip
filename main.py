@@ -755,6 +755,137 @@ class LoopClipApp(ctk.CTk):
             "LoopClip will keep working normally with the current version.",
         )
 
+
+    def _manual_check_ytdlp_update(self):
+        """
+        On-demand version of the startup check, triggered from the
+        "Check for Updates" header button. Unlike _check_yt_dlp_update()
+        (which stays completely silent unless there's actually something
+        new - see its docstring), this always shows a result: checking,
+        up to date, update available, or "couldn't reach PyPI" - since a
+        button the user explicitly clicked should never just do nothing.
+
+        Reuses the same download_update()/apply_update() functions and
+        success/failure handling as the automatic banner, just wired to
+        this dialog's own widgets instead of the main window's notice
+        frame.
+        """
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("yt-dlp Update Check")
+        dialog.resizable(False, False)
+        dialog.configure(fg_color=COLOR_BG)
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog_width = 380
+
+        status_label = ctk.CTkLabel(
+            dialog, text="Checking for updates...", font=ctk.CTkFont(size=12),
+            wraplength=340, justify="left", anchor="w",
+        )
+        status_label.pack(fill="x", padx=20, pady=(20, 10))
+
+        button_row = ctk.CTkFrame(dialog, fg_color="transparent")
+        button_row.pack(fill="x", padx=20, pady=(0, 16), side="bottom")
+
+        ctk.CTkButton(
+            button_row, text="Close", width=90, fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOVER, command=dialog.destroy,
+        ).pack(side="right")
+
+        def relayout():
+            if not dialog.winfo_exists():
+                return
+            dialog.update_idletasks()
+            dialog.geometry(f"{dialog_width}x{dialog.winfo_reqheight()}")
+
+        dialog.update_idletasks()
+        dialog.geometry(f"{dialog_width}x{dialog.winfo_reqheight()}")
+
+        def report(status: dict, current: str):
+            if not dialog.winfo_exists():
+                return
+            latest = status["latest"]
+            if latest is None:
+                status_label.configure(
+                    text=f"Currently running yt-dlp {current}.\n"
+                    "Could not reach PyPI to check for a newer version."
+                )
+                relayout()
+                return
+            if status["up_to_date"]:
+                status_label.configure(text=f"You're on the latest version of yt-dlp ({current}).")
+                relayout()
+                return
+
+            info = status["info"]
+            if info is None:
+                status_label.configure(
+                    text=f"Update available: {current} \u2192 {latest}.\n"
+                    "No downloadable release was found for it yet - please "
+                    "check again later."
+                )
+                relayout()
+                return
+
+            status_label.configure(text=f"Update available: {current} \u2192 {latest}.")
+            install_btn = ctk.CTkButton(
+                button_row, text="Download & Install", width=140, fg_color=COLOR_ACCENT,
+                hover_color=COLOR_ACCENT_HOVER,
+                command=lambda: do_install(info, install_btn),
+            )
+            install_btn.pack(side="left")
+            relayout()
+
+        def do_install(info, install_btn):
+            install_btn.configure(state="disabled", text="Updating...")
+
+            def do_update():
+                try:
+                    wheel_path = ytdlp_updater.download_update(info)
+                    ytdlp_updater.apply_update(wheel_path, info.latest_version)
+                    self.after(0, lambda: on_success(info))
+                except ytdlp_updater.UpdateError as exc:
+                    message = str(exc)  # captured now - see _start_ytdlp_update for why
+                    self.after(0, lambda: on_failure(message))
+                except Exception as exc:
+                    message = f"An unexpected error occurred: {exc}"
+                    self.after(0, lambda: on_failure(message))
+
+            threading.Thread(target=do_update, daemon=True).start()
+
+        def on_success(info):
+            if not dialog.winfo_exists():
+                return
+            status_label.configure(
+                text=(
+                    f"yt-dlp {info.latest_version} downloaded and verified. "
+                    "Restart LoopClip to start using it."
+                ),
+            )
+            for child in list(button_row.winfo_children()):
+                if isinstance(child, ctk.CTkButton) and child.cget("text") in ("Updating...", "Download & Install"):
+                    child.destroy()
+            relayout()
+
+        def on_failure(message: str):
+            if dialog.winfo_exists():
+                dialog.destroy()
+            messagebox.showerror(
+                "yt-dlp update failed",
+                f"Could not update yt-dlp:\n\n{message}\n\n"
+                "LoopClip will keep working normally with the current version.",
+            )
+
+        def do_check():
+            try:
+                current = downloader.get_installed_version()
+            except Exception:
+                current = "unknown"
+            status = ytdlp_updater.check_status(current)
+            self.after(0, lambda: report(status, current))
+
+        threading.Thread(target=do_check, daemon=True).start()
+
     # ------------------------------------------------------------------ UI
 
     def _build_ui(self):
@@ -773,6 +904,11 @@ class LoopClipApp(ctk.CTk):
             header_row, text="Help", width=56, height=22, font=ctk.CTkFont(size=11),
             fg_color="transparent", hover_color=COLOR_PANEL, text_color="gray60",
             command=self._show_help_dialog,
+        ).pack(side="right", padx=(0, 4))
+        ctk.CTkButton(
+            header_row, text="Check for Updates", width=130, height=22, font=ctk.CTkFont(size=11),
+            fg_color="transparent", hover_color=COLOR_PANEL, text_color="gray60",
+            command=self._manual_check_ytdlp_update,
         ).pack(side="right", padx=(0, 4))
 
         ctk.CTkLabel(
