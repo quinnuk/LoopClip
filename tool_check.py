@@ -12,7 +12,9 @@ This avoids relying only on PATH, which may not be configured the same way
 in every packaged environment.
 """
 
+import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -66,6 +68,60 @@ def check_ytdlp() -> bool:
 
 def check_ffmpeg() -> bool:
     return find_ffmpeg() is not None
+
+
+def get_ffmpeg_version() -> str | None:
+    """Return FFmpeg's version string (e.g. '6.1.1'), or None if unavailable."""
+    ffmpeg_path = find_ffmpeg()
+    if not ffmpeg_path:
+        return None
+    try:
+        result = subprocess.run(
+            [ffmpeg_path, "-version"],
+            capture_output=True, text=True, timeout=5,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+        first_line = (result.stdout or "").splitlines()[0] if result.stdout else ""
+        match = re.search(r"ffmpeg version (\S+)", first_line)
+        return match.group(1) if match else None
+    except Exception:
+        return None
+
+
+def check_nvenc() -> tuple[bool, str]:
+    """
+    Probe whether NVENC (NVIDIA hardware encoding) actually works, via a
+    tiny real test encode - just checking for an NVIDIA GPU isn't enough,
+    since NVENC also needs a compatible driver, so this mirrors the
+    NVENC-first/CPU-fallback pattern used for real encodes elsewhere in
+    the app (see processor.py).
+    Returns (available, human_readable_message).
+    """
+    ffmpeg_path = find_ffmpeg()
+    if not ffmpeg_path:
+        return False, "Not available (FFmpeg not found)"
+
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg_path, "-v", "error", "-f", "lavfi",
+                "-i", "color=black:s=64x64:d=0.1",
+                "-c:v", "hevc_nvenc", "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+        if result.returncode == 0:
+            return True, "Available (NVIDIA GPU detected)"
+        return False, (
+            "Not available (no compatible NVIDIA GPU/driver detected) - "
+            "using CPU encoding"
+        )
+    except Exception:
+        return False, (
+            "Not available (no compatible NVIDIA GPU/driver detected) - "
+            "using CPU encoding"
+        )
 
 
 def missing_tools_message() -> str | None:

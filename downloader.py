@@ -93,6 +93,25 @@ def is_valid_url(url: str) -> bool:
     return bool(url) and bool(URL_RE.match(url.strip()))
 
 
+def is_valid_youtube_url(url: str) -> bool:
+    """main.py-facing check: a valid URL that also points at YouTube.
+    (is_valid_url() alone accepts any http(s) URL.)"""
+    if not is_valid_url(url):
+        return False
+    host = urlsplit(url.strip()).netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host in ("youtube.com", "m.youtube.com", "youtu.be", "music.youtube.com")
+
+
+def get_installed_version() -> str:
+    """The currently-active yt-dlp version, for the About dialog / update
+    checker. Reads it from the yt_dlp package itself so it always
+    reflects whichever build is actually active (including a pending
+    override applied by ytdlp_updater.activate_pending_override())."""
+    return yt_dlp.version.__version__
+
+
 def normalize_url(url: str) -> str:
     """Canonical form of a URL for duplicate detection: strips tracking
     query parameters, a leading "www.", and any trailing slash, and sorts

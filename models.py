@@ -1,62 +1,69 @@
 """
 models.py
 ---------
-Shared data model for queue items. Having one DownloadItem object (instead
-of passing loose values around) makes the queue considerably easier to
-maintain, and gives every part of the app the same vocabulary for status.
+Shared data model for one queue item as it moves through LoopClip's
+pipeline: download -> (optionally) analyze for a loop point -> (optionally)
+trim to it -> (optionally) crossfade into a seamless loop -> finished.
+
+This replaces the older, simpler DownloadItem/Status pair (download-only,
+no processing stages) that used to live here. That older model is what
+download_manager.py and queue_store.py were built against - since nothing
+in the current app (main.py) imports either of those two files anymore,
+they're now orphaned. Safe to delete, or leave in place unused.
 """
 
 import uuid
 from dataclasses import dataclass, field
+from typing import Optional
 
 
-class Status:
-    """The six states a download can be in.
+class QueueState:
+    """The states one queue item can move through.
 
-    Paused, Cancelled and Failed are kept deliberately distinct:
-    - Paused: stopped safely, partial file kept, can be resumed.
-    - Cancelled: abandoned by the user, partial file removed.
-    - Failed: stopped because of an error, partial file's fate depends on
-      the error but the item itself is not silently retried.
+    Not every item visits every state: ANALYZING/TRIMMING are skipped
+    when `auto_loop` is off, and LOOPING is skipped when `seamless_loop`
+    is off. See queue_manager.py's `_process_item` for the exact flow.
     """
 
     QUEUED = "Queued"
     DOWNLOADING = "Downloading"
-    PAUSED = "Paused"
-    COMPLETED = "Completed"
-    FAILED = "Failed"
+    ANALYZING = "Analyzing"
+    TRIMMING = "Trimming"
+    LOOPING = "Looping"
+    FINISHED = "Finished"
+    ERROR = "Error"
     CANCELLED = "Cancelled"
-
-    # Statuses from which a queue run will pick an item up.
-    RUNNABLE = (QUEUED, PAUSED)
-
-    ICONS = {
-        QUEUED: "\u23f3",       # hourglass
-        DOWNLOADING: "\u2b07",  # down arrow
-        PAUSED: "\u23f8",       # pause
-        COMPLETED: "\u2713",    # check
-        FAILED: "\u274c",       # cross mark
-        CANCELLED: "\u2715",    # multiplication x
-    }
 
 
 @dataclass
-class DownloadItem:
+class QueueItem:
+    # -- set once, at creation (mirrors main.py's QueueItem(...) call) -----
     url: str
-    output_folder: str
     quality: str
-    include_audio: bool = True
-    keep_original: bool = False
-    duplicate_mode: str = "Rename automatically"
-    audio_bitrate: str = "192"
-    format_container: str = "best"
-    subtitle_mode: str = "none"
-    embed_subs: bool = False
-    speed_limit_bytes: int | None = None
-    cookies_from_browser: str = "none"  # "none" | "chrome" | "edge" | "firefox" | "brave"
-    title: str = "Video link"
-    status: str = Status.QUEUED
-    filepath: str | None = None
-    error: str | None = None
-    error_detail: str | None = None
+    no_audio: bool
+    audio_bitrate: str
+    video_bitrate: str
+    auto_loop: bool
+    loop_method: str
+    similarity: float
+    search_start: str
+    search_stop: str
+    downsample: int
+    min_loop_seconds: Optional[float]
+    max_loop_seconds: Optional[float]
+    output_folder: str
+    delete_original: bool
+    seamless_loop: bool
+    crossfade_seconds: float
+
+    # -- runtime/display fields, updated by queue_manager as the item runs --
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    state: str = QueueState.QUEUED
+    title: str = ""
+    percent: float = 0.0
+    operation: str = ""
+    speed: str = "-"
+    eta: str = "-"
+    output_name: Optional[str] = None
+    error_message: Optional[str] = None
+    warning_message: Optional[str] = None
