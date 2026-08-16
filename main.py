@@ -331,6 +331,14 @@ class LoopClipApp(ctk.CTk):
         self.cfg = settings_module.load_settings()
         self.queue_manager = QueueManager(on_update=self._on_queue_update, temp_root=TEMP_ROOT)
 
+        # Optimistic default (encode functions still fall back to CPU on
+        # failure either way) until the real probe below finishes - avoids
+        # blocking startup on the ~15s-worst-case NVENC test encode. Cached
+        # in tool_check itself, so this is the one real probe for the whole
+        # run; the About dialog's own check_nvenc() call reuses the result.
+        self.nvenc_available = True
+        threading.Thread(target=self._probe_nvenc, daemon=True).start()
+
         self._build_ui()
 
         self._last_seen_clip = None
@@ -342,6 +350,16 @@ class LoopClipApp(ctk.CTk):
 
         self.update_notice_frame = None  # created lazily, only if an update is found
         threading.Thread(target=self._check_yt_dlp_update, daemon=True).start()
+
+    def _probe_nvenc(self) -> None:
+        """Background-thread target: runs the one real NVENC probe for this
+        run of the app (see check_nvenc's own caching) and updates
+        self.nvenc_available with the result. A plain attribute write is
+        safe to do off the main thread here since nothing reads it until
+        the next 'Add to Queue' click, well after this finishes in
+        practice."""
+        available, _ = check_nvenc()
+        self.nvenc_available = available
 
     def _set_app_icon(self):
         """Sets the window/taskbar icon from icon.ico if it's present next
@@ -1598,7 +1616,8 @@ class LoopClipApp(ctk.CTk):
                 output_folder=output_folder,
                 delete_original=self.delete_original_var.get(),
                 seamless_loop=self.seamless_loop_var.get(),
-                crossfade_seconds=self._label_to_crossfade(self.crossfade_var.get()),
+                crossfade_seconds=float(self._label_to_crossfade(self.crossfade_var.get())),
+                use_nvenc=self.nvenc_available,
             )
             self.queue_manager.add_item(item)
             added += 1
@@ -1676,7 +1695,7 @@ class LoopClipApp(ctk.CTk):
             "delete_original": self.delete_original_var.get(),
             "open_folder_when_finished": self.open_folder_var.get(),
             "seamless_loop": self.seamless_loop_var.get(),
-            "crossfade_seconds": self._label_to_crossfade(self.crossfade_var.get()),
+            "crossfade_seconds": float(self._label_to_crossfade(self.crossfade_var.get())),
             "last_url": "",
         })
         settings_module.save_settings(self.cfg)

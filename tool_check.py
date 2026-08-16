@@ -88,18 +88,33 @@ def get_ffmpeg_version() -> str | None:
         return None
 
 
-def check_nvenc() -> tuple[bool, str]:
+_nvenc_cache: tuple[bool, str] | None = None
+
+
+def check_nvenc(use_cache: bool = True) -> tuple[bool, str]:
     """
     Probe whether NVENC (NVIDIA hardware encoding) actually works, via a
     tiny real test encode - just checking for an NVIDIA GPU isn't enough,
     since NVENC also needs a compatible driver, so this mirrors the
     NVENC-first/CPU-fallback pattern used for real encodes elsewhere in
     the app (see processor.py).
+
+    The result is cached after the first real probe (use_cache=True, the
+    default) since this hasn't changed mid-run on any real machine and
+    the probe itself costs real time - callers that want a guaranteed
+    fresh check (e.g. after a driver update) can pass use_cache=False.
+
     Returns (available, human_readable_message).
     """
+    global _nvenc_cache
+    if use_cache and _nvenc_cache is not None:
+        return _nvenc_cache
+
     ffmpeg_path = find_ffmpeg()
     if not ffmpeg_path:
-        return False, "Not available (FFmpeg not found)"
+        result = False, "Not available (FFmpeg not found)"
+        _nvenc_cache = result
+        return result
 
     try:
         result = subprocess.run(
@@ -112,16 +127,19 @@ def check_nvenc() -> tuple[bool, str]:
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
         if result.returncode == 0:
-            return True, "Available (NVIDIA GPU detected)"
-        return False, (
-            "Not available (no compatible NVIDIA GPU/driver detected) - "
-            "using CPU encoding"
-        )
+            outcome = True, "Available (NVIDIA GPU detected)"
+        else:
+            outcome = False, (
+                "Not available (no compatible NVIDIA GPU/driver detected) - "
+                "using CPU encoding"
+            )
     except Exception:
-        return False, (
+        outcome = False, (
             "Not available (no compatible NVIDIA GPU/driver detected) - "
             "using CPU encoding"
         )
+    _nvenc_cache = outcome
+    return outcome
 
 
 def missing_tools_message() -> str | None:

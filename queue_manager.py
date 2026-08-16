@@ -213,7 +213,16 @@ class QueueManager:
                 include_audio=not item.no_audio,
                 audio_bitrate=item.audio_bitrate,
                 control=control,
-                duplicate_mode="Overwrite",
+                # NOT "Overwrite": yt-dlp's overwrites option implicitly
+                # disables resume (--force-overwrites forces a clean
+                # re-download every time), which was silently breaking
+                # Retry on partial downloads. This is a temp/working file
+                # anyway - the real duplicate-safe naming happens later in
+                # _run_loop_or_finalize via unique_output_path - so any
+                # value other than "Overwrite"/"Rename automatically" here
+                # is fine; it just means "don't clobber a finished file,
+                # and don't disable resume."
+                duplicate_mode="Skip",
             )
         finally:
             with self._lock:
@@ -266,6 +275,7 @@ class QueueManager:
             no_audio=item.no_audio,
             process_holder={},
             cancel_check=self._cancel_check,
+            use_nvenc=item.use_nvenc,
         )
         item.percent = 100.0
         self._notify()
@@ -292,6 +302,7 @@ class QueueManager:
                 process_holder={},
                 cancel_check=self._cancel_check,
                 on_warning=warnings.append,
+                use_nvenc=item.use_nvenc,
             )
             if warnings:
                 item.warning_message = warnings[-1]

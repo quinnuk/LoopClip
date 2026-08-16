@@ -203,6 +203,7 @@ def process_video(
     no_audio: bool,
     process_holder: Optional[dict] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    use_nvenc: bool = True,
 ) -> None:
     """
     Produces the final output file from input_path, applying trimming
@@ -245,27 +246,31 @@ def process_video(
     # never upscaled), user-selected target bitrate, source frame rate
     # preserved (no forced -r). Tries NVIDIA NVENC (GPU) first, and only
     # falls back to slower CPU encoding (libx265) if no Nvidia GPU/driver
-    # is available on the machine running this.
-    hevc_nvenc_cmd = [
-        "ffmpeg", "-y",
-        *seek_args,
-        "-i", input_path,
-        *duration_args,
-        "-vf", f"{_scale_filter()},format=nv12",
-        "-c:v", "hevc_nvenc",
-        "-preset", "p4",  # NVENC speed/quality preset (p1 fastest - p7 slowest)
-        "-rc", "vbr",
-        "-b:v", vbitrate,
-        "-maxrate", vbitrate,
-        "-bufsize", f"{int(video_bitrate) * 2}M",
-        *audio_args,
-        output_path,
-    ]
-    returncode, nvenc_stderr = _run_ffmpeg(hevc_nvenc_cmd, process_holder, cancel_check)
-    if returncode == 0 and Path(output_path).exists():
-        return
-
-    nvenc_tail = "\n".join((nvenc_stderr or "").strip().splitlines()[-4:])
+    # is available on the machine running this - or skips straight to CPU
+    # if use_nvenc is False (a prior check_nvenc() probe already found no
+    # working NVENC on this machine, so trying again here would only
+    # waste time failing the same way every single encode).
+    nvenc_tail = ""
+    if use_nvenc:
+        hevc_nvenc_cmd = [
+            "ffmpeg", "-y",
+            *seek_args,
+            "-i", input_path,
+            *duration_args,
+            "-vf", f"{_scale_filter()},format=nv12",
+            "-c:v", "hevc_nvenc",
+            "-preset", "p4",  # NVENC speed/quality preset (p1 fastest - p7 slowest)
+            "-rc", "vbr",
+            "-b:v", vbitrate,
+            "-maxrate", vbitrate,
+            "-bufsize", f"{int(video_bitrate) * 2}M",
+            *audio_args,
+            output_path,
+        ]
+        returncode, nvenc_stderr = _run_ffmpeg(hevc_nvenc_cmd, process_holder, cancel_check)
+        if returncode == 0 and Path(output_path).exists():
+            return
+        nvenc_tail = "\n".join((nvenc_stderr or "").strip().splitlines()[-4:])
 
     # CPU fallback (no Nvidia GPU available, or NVENC failed for some
     # other reason) - same H.265/bitrate/resolution-cap target via libx265.
@@ -383,6 +388,7 @@ def apply_seamless_loop(
     process_holder: Optional[dict] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     on_warning: Optional[Callable[[str], None]] = None,
+    use_nvenc: bool = True,
 ) -> None:
     """
     Makes a clip loop seamlessly by cross-fading its last `crossfade_seconds`
@@ -441,6 +447,7 @@ def apply_seamless_loop(
         )
         _plain_copy_fallback(
             input_path, output_path, video_bitrate, no_audio, process_holder, cancel_check,
+            use_nvenc=use_nvenc,
         )
         return
 
@@ -475,11 +482,12 @@ def apply_seamless_loop(
             )
             _crossfade_two_clips(
                 tail_path, head_path, transition_path, x, video_bitrate, no_audio,
-                process_holder, cancel_check, fps=fps,
+                process_holder, cancel_check, fps=fps, use_nvenc=use_nvenc,
             )
             _encode_segment(
                 input_path, middle_path, x, end_start, video_bitrate, no_audio,
                 process_holder, cancel_check, error_context="the main body of the clip", fps=fps,
+                use_nvenc=use_nvenc,
             )
 
             with open(concat_list_path, "w", encoding="utf-8") as f:
@@ -507,6 +515,7 @@ def apply_seamless_loop(
             )
             _plain_copy_fallback(
                 input_path, output_path, video_bitrate, no_audio, process_holder, cancel_check,
+                use_nvenc=use_nvenc,
             )
     finally:
         for p in (head_path, tail_path, middle_path, transition_path, concat_list_path):
@@ -524,6 +533,7 @@ def _plain_copy_fallback(
     no_audio: bool,
     process_holder: Optional[dict],
     cancel_check: Optional[Callable[[], bool]],
+    use_nvenc: bool = True,
 ) -> None:
     """Saves the full, un-blended clip as-is - used when the seamless loop
     crossfade can't be built. This is what apply_seamless_loop falls back
@@ -552,18 +562,19 @@ def _plain_copy_fallback(
     vbitrate = f"{video_bitrate}M"
     reencode_audio_args = ["-an"] if no_audio else ["-c:a", "aac", "-b:a", "192k"]
 
-    nvenc_cmd = [
-        "ffmpeg", "-y", "-i", input_path,
-        "-vf", f"{_scale_filter()},format=nv12",
-        "-c:v", "hevc_nvenc", "-preset", "p4", "-rc", "vbr",
-        "-b:v", vbitrate, "-maxrate", vbitrate, "-bufsize", f"{int(video_bitrate) * 2}M",
-        *reencode_audio_args, output_path,
-    ]
-    returncode, nvenc_stderr = _run_ffmpeg(nvenc_cmd, process_holder, cancel_check)
-    if returncode == 0 and Path(output_path).exists():
-        return
-
-    nvenc_tail = "\n".join((nvenc_stderr or "").strip().splitlines()[-4:])
+    nvenc_tail = ""
+    if use_nvenc:
+        nvenc_cmd = [
+            "ffmpeg", "-y", "-i", input_path,
+            "-vf", f"{_scale_filter()},format=nv12",
+            "-c:v", "hevc_nvenc", "-preset", "p4", "-rc", "vbr",
+            "-b:v", vbitrate, "-maxrate", vbitrate, "-bufsize", f"{int(video_bitrate) * 2}M",
+            *reencode_audio_args, output_path,
+        ]
+        returncode, nvenc_stderr = _run_ffmpeg(nvenc_cmd, process_holder, cancel_check)
+        if returncode == 0 and Path(output_path).exists():
+            return
+        nvenc_tail = "\n".join((nvenc_stderr or "").strip().splitlines()[-4:])
 
     cpu_cmd = [
         "ffmpeg", "-y", "-i", input_path,
@@ -640,7 +651,7 @@ def _quick_trim(
 def _crossfade_two_clips(
     tail_path: str, head_path: str, output_path: str, x: float, video_bitrate: str,
     no_audio: bool, process_holder: Optional[dict], cancel_check: Optional[Callable[[], bool]],
-    fps: float = 30.0,
+    fps: float = 30.0, use_nvenc: bool = True,
 ) -> None:
     """Blends tail_path into head_path into a single x-second transition
     clip. Both inputs are already tiny standalone files at this point, so
@@ -682,18 +693,19 @@ def _crossfade_two_clips(
         map_args = ["-map", "[vout]", "-map", "[aout]"]
         audio_out_args = ["-c:a", "aac", "-b:a", "192k"]
 
-    nvenc_cmd = [
-        "ffmpeg", "-y", "-i", tail_path, "-i", head_path,
-        "-filter_complex", filter_complex, *map_args,
-        "-c:v", "hevc_nvenc", "-preset", "p4", "-rc", "vbr",
-        "-b:v", vbitrate, "-maxrate", vbitrate, "-bufsize", f"{int(video_bitrate) * 2}M",
-        *audio_out_args, output_path,
-    ]
-    returncode, nvenc_stderr = _run_ffmpeg(nvenc_cmd, process_holder, cancel_check)
-    if returncode == 0 and Path(output_path).exists():
-        return
-
-    nvenc_tail = "\n".join((nvenc_stderr or "").strip().splitlines()[-4:])
+    nvenc_tail = ""
+    if use_nvenc:
+        nvenc_cmd = [
+            "ffmpeg", "-y", "-i", tail_path, "-i", head_path,
+            "-filter_complex", filter_complex, *map_args,
+            "-c:v", "hevc_nvenc", "-preset", "p4", "-rc", "vbr",
+            "-b:v", vbitrate, "-maxrate", vbitrate, "-bufsize", f"{int(video_bitrate) * 2}M",
+            *audio_out_args, output_path,
+        ]
+        returncode, nvenc_stderr = _run_ffmpeg(nvenc_cmd, process_holder, cancel_check)
+        if returncode == 0 and Path(output_path).exists():
+            return
+        nvenc_tail = "\n".join((nvenc_stderr or "").strip().splitlines()[-4:])
 
     cpu_cmd = [
         "ffmpeg", "-y", "-i", tail_path, "-i", head_path,
@@ -717,7 +729,7 @@ def _crossfade_two_clips(
 def _encode_segment(
     input_path: str, output_path: str, start: float, end: float, video_bitrate: str,
     no_audio: bool, process_holder: Optional[dict], cancel_check: Optional[Callable[[], bool]],
-    error_context: str, fps: float = 30.0,
+    error_context: str, fps: float = 30.0, use_nvenc: bool = True,
 ) -> None:
     """Encodes [start, end) of input_path to the standard H.265/resolution-
     cap/bitrate spec used elsewhere, at a fixed `fps` (matching the
@@ -732,18 +744,19 @@ def _encode_segment(
     # see _audio_args' docstring note for why.
     audio_args = ["-an"] if no_audio else ["-c:a", "aac", "-b:a", "192k"]
 
-    nvenc_cmd = [
-        "ffmpeg", "-y", "-ss", str(start), "-i", input_path, "-t", str(dur),
-        "-vf", f"{_scale_filter()},fps={fps},format=nv12",
-        "-c:v", "hevc_nvenc", "-preset", "p4", "-rc", "vbr",
-        "-b:v", vbitrate, "-maxrate", vbitrate, "-bufsize", f"{int(video_bitrate) * 2}M",
-        *audio_args, output_path,
-    ]
-    returncode, nvenc_stderr = _run_ffmpeg(nvenc_cmd, process_holder, cancel_check)
-    if returncode == 0 and Path(output_path).exists():
-        return
-
-    nvenc_tail = "\n".join((nvenc_stderr or "").strip().splitlines()[-4:])
+    nvenc_tail = ""
+    if use_nvenc:
+        nvenc_cmd = [
+            "ffmpeg", "-y", "-ss", str(start), "-i", input_path, "-t", str(dur),
+            "-vf", f"{_scale_filter()},fps={fps},format=nv12",
+            "-c:v", "hevc_nvenc", "-preset", "p4", "-rc", "vbr",
+            "-b:v", vbitrate, "-maxrate", vbitrate, "-bufsize", f"{int(video_bitrate) * 2}M",
+            *audio_args, output_path,
+        ]
+        returncode, nvenc_stderr = _run_ffmpeg(nvenc_cmd, process_holder, cancel_check)
+        if returncode == 0 and Path(output_path).exists():
+            return
+        nvenc_tail = "\n".join((nvenc_stderr or "").strip().splitlines()[-4:])
 
     cpu_cmd = [
         "ffmpeg", "-y", "-ss", str(start), "-i", input_path, "-t", str(dur),

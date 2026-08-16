@@ -55,6 +55,11 @@ class QueueItem:
     delete_original: bool
     seamless_loop: bool
     crossfade_seconds: float
+    # Whether to attempt NVENC (GPU) encoding before falling back to CPU.
+    # Set once at creation from a cached tool_check.check_nvenc() probe, so
+    # machines without a working NVIDIA encoder skip straight to CPU instead
+    # of wasting time on an NVENC attempt that's known to fail every time.
+    use_nvenc: bool = True
 
     # -- runtime/display fields, updated by queue_manager as the item runs --
     id: str = field(default_factory=lambda: uuid.uuid4().hex)

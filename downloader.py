@@ -314,6 +314,13 @@ def download_video(
             "http": lambda n, _d=retry_delay: _d,
             "fragment": lambda n, _d=retry_delay: _d,
         },
+        # Fetch in bounded-size HTTP range requests rather than one long-lived
+        # connection. Large/high-bitrate streams (4K HDR in particular) are
+        # the most likely to have the CDN drop a single continuous connection
+        # mid-stream, which surfaces as "X bytes read, Y more expected" -
+        # chunking means a dropped connection only costs one chunk, which
+        # then retries cleanly via fragment_retries above.
+        "http_chunk_size": 10 * 1024 * 1024,  # 10 MB
     }
     if speed_limit_bytes:
         ydl_opts["ratelimit"] = speed_limit_bytes
