@@ -348,6 +348,36 @@ def get_fps(path: str) -> float:
         return 30.0
 
 
+def has_audio_stream(path: str) -> bool:
+    """
+    Returns whether path has at least one audio stream, via ffprobe.
+
+    Needed because no_audio (the user's "No sound" checkbox) only says
+    whether audio was *requested* - a source video can genuinely have no
+    audio track of its own (silent uploads, or a video-only format yt-dlp
+    fell back to) even with no_audio=False. Callers that build a filter
+    graph referencing [N:a] must check this first, or ffmpeg fails with
+    "Stream specifier ':a' ... matches no streams" when the stream simply
+    isn't there. Defaults to False (safe/video-only) if ffprobe can't
+    determine it, rather than risking building a graph around a stream
+    that may not exist.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-select_streams", "a",
+                "-show_entries", "stream=index",
+                "-of", "csv=p=0",
+                path,
+            ],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            creationflags=_NO_WINDOW,
+        )
+        return bool(result.stdout.strip())
+    except (OSError, FileNotFoundError):
+        return False
+
+
 def get_duration_seconds(path: str) -> float:
     """Returns the duration of a media file in seconds, via ffprobe."""
     try:
@@ -480,12 +510,38 @@ def apply_seamless_loop(
                 input_path, tail_path, end_start, duration, no_audio, process_holder, cancel_check,
                 force_reencode=True, fps=fps,
             )
+
+            # Resolved once, here, rather than separately inside each of the
+            # three encode steps below: if either the head or tail piece
+            # came out with no audio stream (the source's audio track can
+            # end slightly before its video track, or briefly drop out,
+            # even on a source that clearly "has sound" overall), every
+            # piece fed into the final concat step must agree on this - a
+            # transition clip with no audio concatenated (`-c copy`) with a
+            # middle segment that DOES have audio produces a file with
+            # mismatched streams, which the concat demuxer either rejects
+            # or handles unpredictably. Silently doing the safe thing
+            # (drop audio everywhere) without saying so would leave a
+            # legitimate audio dropout indistinguishable from a real bug,
+            # so this is surfaced via on_warning either way.
+            effective_no_audio = no_audio
+            if not no_audio and not (has_audio_stream(head_path) and has_audio_stream(tail_path)):
+                effective_no_audio = True
+                _warn(
+                    on_warning,
+                    "The audio track doesn't cover the very start/end of this "
+                    "clip (where the loop transition blends), so the seamless "
+                    "loop was built without audio rather than risk a broken "
+                    "file. If the source has continuous audio throughout, "
+                    "this may be worth reporting as a bug.",
+                )
+
             _crossfade_two_clips(
-                tail_path, head_path, transition_path, x, video_bitrate, no_audio,
+                tail_path, head_path, transition_path, x, video_bitrate, effective_no_audio,
                 process_holder, cancel_check, fps=fps, use_nvenc=use_nvenc,
             )
             _encode_segment(
-                input_path, middle_path, x, end_start, video_bitrate, no_audio,
+                input_path, middle_path, x, end_start, video_bitrate, effective_no_audio,
                 process_holder, cancel_check, error_context="the main body of the clip", fps=fps,
                 use_nvenc=use_nvenc,
             )

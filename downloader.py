@@ -14,6 +14,20 @@ URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 
 FORMAT_SELECTORS = {
     "best": "bestvideo+bestaudio/best",
+    # Prefers a genuinely HDR-tagged 4K stream (dynamic_range filter -
+    # matches YouTube's HDR variants) if one exists at this resolution,
+    # falling back through progressively looser matches so this quality
+    # tier always resolves to *something* even on a source with no HDR
+    # version: same HDR check without the exact 2160p cap, then plain
+    # best-at-2160p, then unconditional best. Previously this key didn't
+    # exist in this dict at all, so "4K HDR Preferred" silently fell
+    # through to the plain "best" selector below and never actually
+    # preferred HDR.
+    "4k_hdr": (
+        "bestvideo[height<=2160][dynamic_range=HDR]+bestaudio/"
+        "bestvideo[dynamic_range=HDR]+bestaudio/"
+        "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best"
+    ),
     "2160p": "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best",
     "1440p": "bestvideo[height<=1440]+bestaudio/best[height<=1440]/best",
     "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
